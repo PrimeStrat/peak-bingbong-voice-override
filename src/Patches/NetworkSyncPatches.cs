@@ -1,30 +1,27 @@
-using System;
-using System.Net;
+﻿using System;
+using System.Collections.Generic;
 using System.Reflection;
+using System.Reflection.Emit;
 using HarmonyLib;
 
 namespace BingBongVoiceOverride.Patches;
 
-// Hooks PEAK's session-join events via reflection so the sound sync server starts on the host and clients pull files automatically when joining.
+// Hooks PEAK's Photon-based player-join and player-leave events to start the sound sync server
+// on the host and automatically download files on clients when joining a room.
 internal static class NetworkSyncPatches
 {
     private static bool _applied = false;
 
-    private static readonly string[] SessionTypeNames =
-    {
-        "SteamLobbyHandler",
-        "LobbyManager",
-        "NetworkSessionManager",
-    };
+    // True when the local player clicked Play to create the lobby. Set from MainMenuMainPage.PlayClicked
+    // because PhotonNetwork.IsMasterClient is unreliable inside PlayerConnectionLog callbacks (PEAK quirk;
+    // documented by PEAKUnlimited's PlayClickedPatch). Cleared when leaving the room.
+    internal static bool LocalPlayerCreatedLobby = false;
 
-    private static readonly string[] JoinMethodNames =
-    {
-        "OnJoinedLobby",
-        "OnJoinedRoom",
-        "OnSessionJoined",
-    };
+    // One-shot guard: OnJoinedRoom is fired by PEAK on every frame while in a room, not just once.
+    // Cleared by OnLeftRoomPostfix so the next session starts fresh.
+    private static bool _joinedRoomHandled = false;
 
-    // Attempts to patch PEAK's session-join method using reflection. Falls back silently when types are not found.
+    // Attempts to patch PEAK's PlayerConnectionLog for Photon player join/leave detection.
     // harmony (Harmony): Harmony instance to register patches with
     // returns: void
     internal static void TryApply(Harmony harmony)
@@ -32,110 +29,535 @@ internal static class NetworkSyncPatches
         if (_applied) return;
         _applied = true;
 
-        foreach (string typeName in SessionTypeNames)
+        Type? logType = AccessTools.TypeByName("PlayerConnectionLog");
+        if (logType == null)
         {
-            Type sessionType = AccessTools.TypeByName(typeName);
-            if (sessionType == null) continue;
-
-            foreach (string methodName in JoinMethodNames)
-            {
-                MethodInfo method = AccessTools.Method(sessionType, methodName);
-                if (method == null) continue;
-
-                try
-                {
-                    harmony.Patch(method,
-                        postfix: new HarmonyMethod(
-                            typeof(NetworkSyncPatches),
-                            nameof(OnSessionJoinedPostfix)));
-
-                    Plugin.Log.LogInfo($"[NetworkSync] Patched {typeName}.{methodName} for auto-sync.");
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.LogWarning($"[NetworkSync] Failed to patch {typeName}.{methodName}: {ex.Message}");
-                }
-            }
+            Plugin.Log.LogWarning("[NetworkSync] PlayerConnectionLog type not found. Player auto-detect disabled.");
+        }
+        else
+        {
+            TryPatch(harmony, logType, "OnPlayerEnteredRoom", nameof(OnPlayerEnteredRoomPostfix));
+            TryPatch(harmony, logType, "OnPlayerLeftRoom", nameof(OnPlayerLeftRoomPostfix));
+            TryPatch(harmony, logType, "OnJoinedRoom", nameof(OnJoinedRoomPostfix));
+            TryPatch(harmony, logType, "OnLeftRoom", nameof(OnLeftRoomPostfix));
         }
 
-        Plugin.Log.LogWarning("[NetworkSync] No session-join method found automatically. Use manual sync in the Network tab.");
+        // Track lobby-host intent up front because IsMasterClient lies inside the join callbacks.
+        Type? menuType = AccessTools.TypeByName("MainMenuMainPage");
+        if (menuType != null)
+            TryPatch(harmony, menuType, "PlayClicked", nameof(PlayClickedPostfix));
     }
 
-    private static void OnSessionJoinedPostfix(object __instance)
+    private static void TryPatch(Harmony harmony, Type type, string methodName, string postfixName)
     {
         try
         {
-            string hostIp = TryExtractHostIp(__instance) ?? string.Empty;
-
-            bool isHost = TryIsHost(__instance);
-            if (isHost)
+            MethodInfo? method = AccessTools.Method(type, methodName);
+            if (method == null)
             {
-                Plugin.Log.LogInfo("[NetworkSync] Local player is host; ensuring server is started.");
-                BingBongNetworkSync.StartServer();
+                Plugin.Log.LogWarning($"[NetworkSync] {type.Name}.{methodName} not found.");
                 return;
             }
-
-            if (string.IsNullOrWhiteSpace(hostIp))
-            {
-                Plugin.Log.LogWarning("[NetworkSync] Joined session but could not determine host IP. Use manual sync in the Network tab.");
-                return;
-            }
-
-            Plugin.Log.LogInfo($"[NetworkSync] Joined session as client; syncing from host {hostIp}.");
-            BingBongNetworkSync.OnPlayerJoined(hostIp);
+            harmony.Patch(method, postfix: new HarmonyMethod(typeof(NetworkSyncPatches), postfixName));
+            Plugin.Log.LogInfo($"[NetworkSync] Patched {type.Name}.{methodName}.");
         }
         catch (Exception ex)
         {
-            Plugin.Log.LogWarning($"[NetworkSync] OnSessionJoinedPostfix error: {ex.Message}");
+            Plugin.Log.LogWarning($"[NetworkSync] Failed to patch {type.Name}.{methodName}: {ex.Message}");
         }
     }
 
-    private static string? TryExtractHostIp(object instance)
+    // Postfix fired when another player enters the Photon room.
+    // __0 (object): Photon.Realtime.Player instance injected by Harmony
+    private static void OnPlayerEnteredRoomPostfix(object __0)
     {
-        if (instance == null) return null;
-        Type t = instance.GetType();
-
-        FieldInfo? direct = AccessTools.Field(t, "hostAddress") ?? AccessTools.Field(t, "serverAddress");
-        if (direct != null)
+        try
         {
-            string val = direct.GetValue(direct.IsStatic ? null : instance) as string ?? string.Empty;
-            if (!string.IsNullOrWhiteSpace(val) && IsLikelyIp(val)) return val;
+            string name = PhotonBridge.GetNickName(__0);
+            bool host = LocalPlayerCreatedLobby;
+            Plugin.Log.LogInfo($"[NetworkSync] Player entered room: '{name}'. LocalCreatedLobby={host}");
+            if (host)
+            {
+                if (!BingBongNetworkSync.IsHosting)
+                    BingBongNetworkSync.StartServer();
+                BingBongNetworkSync.OnPhotonPlayerJoined(name);
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[NetworkSync] OnPlayerEnteredRoom error: {ex.Message}");
+        }
+    }
+
+    // Postfix fired when a player leaves the Photon room.
+    // __0 (object): Photon.Realtime.Player instance injected by Harmony
+    private static void OnPlayerLeftRoomPostfix(object __0)
+    {
+        try
+        {
+            string name = PhotonBridge.GetNickName(__0);
+            Plugin.Log.LogInfo($"[NetworkSync] Player left room: '{name}'.");
+            BingBongNetworkSync.OnPhotonPlayerLeft(name);
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[NetworkSync] OnPlayerLeftRoom error: {ex.Message}");
+        }
+    }
+
+    // Postfix fired when the local player joins a Photon room.
+    // PhotonNetwork.IsMasterClient cannot be trusted here (PEAK quirk: it returns false even for the
+    // lobby creator), so we use LocalPlayerCreatedLobby - set by the MainMenuMainPage.PlayClicked patch -
+    // as the source of truth for who is hosting. Also, PEAK calls OnJoinedRoom every frame while in a
+    // room, so _joinedRoomHandled gates this to fire exactly once per session.
+    private static void OnJoinedRoomPostfix()
+    {
+        if (_joinedRoomHandled) return;
+        _joinedRoomHandled = true;
+        try
+        {
+            bool isHost = LocalPlayerCreatedLobby;
+            Plugin.Log.LogInfo($"[NetworkSync] Local player joined room. LocalCreatedLobby={isHost} (PhotonIsMaster={PhotonBridge.IsMasterClient}, ignored)");
+            if (isHost)
+            {
+                BingBongNetworkSync.StartServer();
+                foreach (string name in PhotonBridge.GetOtherPlayerNames())
+                    BingBongNetworkSync.OnPhotonPlayerJoined(name);
+            }
+            else
+            {
+                BingBongNetworkSync.OnPlayerJoined(string.Empty);
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[NetworkSync] OnJoinedRoom error: {ex.Message}");
+        }
+    }
+
+    // Postfix fired when the local player leaves the Photon room. Resets the host-intent flag
+    // so a subsequent join (e.g. joining someone else's lobby) does not incorrectly host again.
+    private static void OnLeftRoomPostfix()
+    {
+        LocalPlayerCreatedLobby = false;
+        _joinedRoomHandled = false;
+        Plugin.Log.LogInfo("[NetworkSync] Left room; cleared LocalPlayerCreatedLobby.");
+        BingBongNetworkSync.StopServer();
+    }
+
+    // Postfix fired when the local player clicks Play in the main menu. PEAK uses this entry point
+    // to create the multiplayer lobby, so this is the only reliable signal that this player will be
+    // the lobby host once the room comes up.
+    private static void PlayClickedPostfix()
+    {
+        LocalPlayerCreatedLobby = true;
+        Plugin.Log.LogInfo("[NetworkSync] PlayClicked detected; this player will host the sync server.");
+    }
+
+    // Returns the local player's Photon NickName, or empty string if unavailable.
+    // returns: string
+    internal static string GetLocalPhotonNickName() => PhotonBridge.GetLocalNickName();
+
+    // Reflection-based access to Photon PUN runtime types without a hard DLL dependency.
+    private static class PhotonBridge
+    {
+        private static Type? _pnType;
+        private static Type? PN => _pnType ??= AccessTools.TypeByName("Photon.Pun.PhotonNetwork");
+
+        private static object? GetProp(string name)
+        {
+            Type? t = PN;
+            if (t == null) return null;
+            return AccessTools.Property(t, name)?.GetValue(null);
         }
 
-        FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-        foreach (FieldInfo f in fields)
+        // True when the local player is the Photon master client.
+        internal static bool IsMasterClient => (bool)(GetProp("IsMasterClient") ?? false);
+
+        // Returns the local player's Photon NickName, or empty string if unavailable.
+        // returns: string
+        internal static string GetLocalNickName()
         {
-            if (f.FieldType != typeof(string)) continue;
-            string lower = f.Name.ToLowerInvariant();
-            if (!lower.Contains("host") && !lower.Contains("server") && !lower.Contains("address")) continue;
-            string val = f.GetValue(f.IsStatic ? null : instance) as string ?? string.Empty;
-            if (!string.IsNullOrWhiteSpace(val) && IsLikelyIp(val)) return val;
+            object? local = GetProp("LocalPlayer");
+            if (local == null) return string.Empty;
+            return AccessTools.Property(local.GetType(), "NickName")?.GetValue(local) as string ?? string.Empty;
         }
 
+        // Extracts NickName from a Photon.Realtime.Player object via reflection.
+        // player (object): Photon Player injected by Harmony
+        // returns: string
+        internal static string GetNickName(object? player)
+        {
+            if (player == null) return string.Empty;
+            return AccessTools.Property(player.GetType(), "NickName")?.GetValue(player) as string ?? string.Empty;
+        }
+
+        // Returns NickName for every non-local player currently in the room.
+        // returns: List<string>
+        internal static List<string> GetOtherPlayerNames()
+        {
+            List<string> names = new();
+            object? room = GetProp("CurrentRoom");
+            if (room == null) return names;
+            object? players = AccessTools.Property(room.GetType(), "Players")?.GetValue(room);
+            if (players is not System.Collections.IDictionary dict) return names;
+
+            // Use ActorNumber comparison to identify the local player -- more reliable than IsLocal reflection.
+            object? localPlayer = GetProp("LocalPlayer");
+            int localActor = localPlayer != null
+                ? (int)(AccessTools.Property(localPlayer.GetType(), "ActorNumber")?.GetValue(localPlayer) ?? -1)
+                : -1;
+
+            foreach (object? val in dict.Values)
+            {
+                if (val == null) continue;
+                int actorNum = (int)(AccessTools.Property(val.GetType(), "ActorNumber")?.GetValue(val) ?? -1);
+                if (localActor >= 0 && actorNum == localActor) continue;
+                string? name = AccessTools.Property(val.GetType(), "NickName")?.GetValue(val) as string;
+                if (!string.IsNullOrWhiteSpace(name)) names.Add(name!);
+            }
+            return names;
+        }
+
+        // Sets a string value on the current Photon room's custom properties.
+        // key (string): property key
+        // value (string): property value
+        // returns: void
+        internal static void SetRoomProperty(string key, string value)
+        {
+            object? room = GetProp("CurrentRoom");
+            if (room == null) return;
+            Type? htType = AccessTools.TypeByName("ExitGames.Client.Photon.Hashtable");
+            if (htType == null) return;
+            object? ht = Activator.CreateInstance(htType);
+            if (ht == null) return;
+            AccessTools.Method(htType, "Add", new[] { typeof(object), typeof(object) })?.Invoke(ht, new object[] { key, value });
+
+            // Search by name only to avoid type-identity mismatches when Photon assemblies are loaded
+            // with different contexts. Fill remaining parameters with their defaults.
+            foreach (MethodInfo m in room.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (m.Name != "SetCustomProperties") continue;
+                ParameterInfo[] p = m.GetParameters();
+                if (p.Length < 1) continue;
+                object?[] args = new object?[p.Length];
+                args[0] = ht;
+                for (int i = 1; i < p.Length; i++)
+                    args[i] = p[i].HasDefaultValue ? p[i].DefaultValue
+                        : (p[i].ParameterType.IsValueType ? Activator.CreateInstance(p[i].ParameterType) : null);
+                m.Invoke(room, args);
+                return;
+            }
+
+            Plugin.Log.LogWarning("[NetworkSync] SetCustomProperties overload not found on Room type.");
+        }
+
+        // Reads a string value from the current Photon room's custom properties.
+        // key (string): property key
+        // returns: string?
+        internal static string? GetRoomProperty(string key)
+        {
+            object? room = GetProp("CurrentRoom");
+            if (room == null) return null;
+            object? props = AccessTools.Property(room.GetType(), "CustomProperties")?.GetValue(room);
+            if (props is not System.Collections.IDictionary dict) return null;
+            return dict[key] as string;
+        }
+    }
+}
+
+// Reflection-based access to Photon's RaiseEvent transport. Lets the mod send and receive
+// arbitrary binary blobs through the existing Photon connection so file transfers work over
+// the internet without any LAN connectivity or firewall holes.
+internal static class PhotonNet
+{
+    private static Type? _pnType;
+    private static Type? PN => _pnType ??= AccessTools.TypeByName("Photon.Pun.PhotonNetwork")
+        ?? AccessTools.TypeByName("PhotonNetwork");
+
+    private static Type? _evDataType;
+    private static Type? EvData => _evDataType ??= AccessTools.TypeByName("ExitGames.Client.Photon.EventData")
+        ?? AccessTools.TypeByName("EventData");
+
+    private static Type? _raiseOptsType;
+    private static Type? RaiseOpts => _raiseOptsType ??= AccessTools.TypeByName("Photon.Realtime.RaiseEventOptions")
+        ?? AccessTools.TypeByName("ExitGames.Client.Photon.RaiseEventOptions")
+        ?? AccessTools.TypeByName("RaiseEventOptions");
+
+    private static Type? _sendOptsType;
+    private static Type? SendOpts => _sendOptsType ??= AccessTools.TypeByName("ExitGames.Client.Photon.SendOptions")
+        ?? AccessTools.TypeByName("SendOptions");
+
+    private static Type? _receiverGroupType;
+    private static Type? ReceiverGroup => _receiverGroupType ??= AccessTools.TypeByName("Photon.Realtime.ReceiverGroup")
+        ?? AccessTools.TypeByName("ExitGames.Client.Photon.Lite.ReceiverGroup")
+        ?? AccessTools.TypeByName("ReceiverGroup");
+
+    private static MethodInfo? _raiseEventMethod;
+    private static MemberInfo? _evCodeMember;
+    private static MemberInfo? _evCustomDataMember;
+    private static MemberInfo? _evSenderMember;
+
+    // Returns the field or property accessor for the given member name on a type.
+    // t (Type): type to inspect
+    // name (string): member name
+    // returns: MemberInfo? - the FieldInfo or PropertyInfo, or null if missing
+    private static MemberInfo? FindMember(Type t, string name)
+    {
+        BindingFlags flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic;
+        FieldInfo? f = t.GetField(name, flags);
+        if (f != null) return f;
+        return t.GetProperty(name, flags);
+    }
+
+    // Reads the value of a field-or-property MemberInfo from the target object.
+    // m (MemberInfo): field or property accessor
+    // target (object): instance to read from
+    // returns: object?
+    private static object? ReadMember(MemberInfo? m, object target)
+    {
+        if (m is FieldInfo f) return f.GetValue(target);
+        if (m is PropertyInfo p) return p.GetValue(target);
         return null;
     }
 
-    private static bool TryIsHost(object instance)
-    {
-        if (instance == null) return false;
-        Type t = instance.GetType();
+    private static bool _subscribed = false;
+    private static Delegate? _eventDelegate;
+    private static object? _subscribedClient;
+    private static EventInfo? _subscribedEvent;
+    private static Action<byte, object?, int>? _userHandler;
 
-        FieldInfo[] fields = t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-        foreach (FieldInfo f in fields)
+    // True when Photon's runtime types are reachable via reflection.
+    internal static bool IsAvailable
+    {
+        get
         {
-            if (f.FieldType != typeof(bool)) continue;
-            string lower = f.Name.ToLowerInvariant();
-            if (!lower.Contains("host") && !lower.Contains("server") && !lower.Contains("master")) continue;
-            return (bool)f.GetValue(f.IsStatic ? null : instance);
+            bool ok = PN != null && EvData != null && RaiseOpts != null && SendOpts != null;
+            if (!_loggedAvailability)
+            {
+                _loggedAvailability = true;
+                Plugin.Log.LogInfo($"[PhotonNet] Reflection bindings: PN={PN?.FullName ?? "null"} EvData={EvData?.FullName ?? "null"} RaiseOpts={RaiseOpts?.FullName ?? "null"} SendOpts={SendOpts?.FullName ?? "null"} Receivers={ReceiverGroup?.FullName ?? "null"}");
+            }
+            return ok;
         }
-        return false;
+    }
+    private static bool _loggedAvailability = false;
+
+    // Returns the local player's Photon actor number, or -1 if not in a room.
+    internal static int LocalActorNumber
+    {
+        get
+        {
+            try
+            {
+                object? local = AccessTools.Property(PN!, "LocalPlayer")?.GetValue(null);
+                if (local == null) return -1;
+                return (int)(AccessTools.Property(local.GetType(), "ActorNumber")?.GetValue(local) ?? -1);
+            }
+            catch { return -1; }
+        }
     }
 
-    private static bool IsLikelyIp(string value)
+    // Returns the master client actor number, or -1 if no room.
+    internal static int MasterActorNumber
     {
-        return value.IndexOf('.') > 0
-            && IPAddress.TryParse(value, out _)
-            && !value.Equals("127.0.0.1");
+        get
+        {
+            try
+            {
+                object? master = AccessTools.Property(PN!, "MasterClient")?.GetValue(null);
+                if (master == null) return -1;
+                return (int)(AccessTools.Property(master.GetType(), "ActorNumber")?.GetValue(master) ?? -1);
+            }
+            catch { return -1; }
+        }
+    }
+
+    // Returns the NickName of the player with the given actor number, or empty string if not found.
+    internal static string GetNickNameForActor(int actorNumber)
+    {
+        try
+        {
+            object? room = AccessTools.Property(PN!, "CurrentRoom")?.GetValue(null);
+            if (room == null) return string.Empty;
+            object? players = AccessTools.Property(room.GetType(), "Players")?.GetValue(room);
+            if (players is not System.Collections.IDictionary dict) return string.Empty;
+            foreach (object? val in dict.Values)
+            {
+                if (val == null) continue;
+                int an = (int)(AccessTools.Property(val.GetType(), "ActorNumber")?.GetValue(val) ?? -1);
+                if (an == actorNumber)
+                    return AccessTools.Property(val.GetType(), "NickName")?.GetValue(val) as string ?? string.Empty;
+            }
+        }
+        catch { }
+        return string.Empty;
+    }
+
+    // Subscribes a single application-level event handler. Replaces any previous subscription.
+    // handler (Action<byte, object?, int>): receives (eventCode, customData, senderActorNumber)
+    internal static void Subscribe(Action<byte, object?, int> handler)
+    {
+        _userHandler = handler;
+        if (_subscribed) return;
+        try
+        {
+            // NetworkingClient is a static FIELD in PUN2, not a property. Use FindMember with Static flag.
+            BindingFlags staticFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+            FieldInfo? ncField = PN!.GetField("NetworkingClient", staticFlags);
+            PropertyInfo? ncProp = PN!.GetProperty("NetworkingClient", staticFlags);
+            object? client = ncField?.GetValue(null) ?? ncProp?.GetValue(null);
+            if (client == null)
+            {
+                Plugin.Log.LogWarning($"[PhotonNet] NetworkingClient unavailable; cannot subscribe. (field={ncField != null}, prop={ncProp != null})");
+                return;
+            }
+            EventInfo? ev = client.GetType().GetEvent("EventReceived");
+            if (ev == null || ev.EventHandlerType == null)
+            {
+                Plugin.Log.LogWarning("[PhotonNet] EventReceived event not found on NetworkingClient.");
+                return;
+            }
+            _evCodeMember ??= FindMember(EvData!, "Code");
+            _evCustomDataMember ??= FindMember(EvData!, "CustomData");
+            _evSenderMember ??= FindMember(EvData!, "Sender");
+            if (_evCodeMember == null || _evCustomDataMember == null || _evSenderMember == null)
+            {
+                Plugin.Log.LogWarning($"[PhotonNet] EventData layout unexpected: Code={_evCodeMember != null} Custom={_evCustomDataMember != null} Sender={_evSenderMember != null}.");
+            }
+
+            // Build a dynamic trampoline: void(EventData) -> calls our static dispatch with object boxing.
+            ParameterInfo[] invokeParams = ev.EventHandlerType.GetMethod("Invoke")!.GetParameters();
+            DynamicMethod dm = new("BBVOPhotonEvTrampoline", typeof(void),
+                new[] { invokeParams[0].ParameterType }, typeof(PhotonNet).Module, true);
+            ILGenerator il = dm.GetILGenerator();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Call, typeof(PhotonNet).GetMethod(nameof(DispatchEvent), BindingFlags.NonPublic | BindingFlags.Static)!);
+            il.Emit(OpCodes.Ret);
+            _eventDelegate = dm.CreateDelegate(ev.EventHandlerType);
+            ev.AddEventHandler(client, _eventDelegate);
+            _subscribedClient = client;
+            _subscribedEvent = ev;
+            _subscribed = true;
+            Plugin.Log.LogInfo("[PhotonNet] Subscribed to Photon EventReceived.");
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[PhotonNet] Subscribe failed: {ex.Message}");
+        }
+    }
+
+    // Unsubscribes the event handler. Safe to call multiple times.
+    internal static void Unsubscribe()
+    {
+        if (!_subscribed) return;
+        try
+        {
+            if (_subscribedEvent != null && _subscribedClient != null && _eventDelegate != null)
+                _subscribedEvent.RemoveEventHandler(_subscribedClient, _eventDelegate);
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[PhotonNet] Unsubscribe failed: {ex.Message}");
+        }
+        _subscribed = false;
+        _subscribedClient = null;
+        _subscribedEvent = null;
+        _eventDelegate = null;
+        _userHandler = null;
+    }
+
+    // Sends an event to every other player in the room (reliable).
+    internal static void SendToOthers(byte code, object? data) => RaiseEvent(code, data, null, true, false);
+
+    // Sends an event to the master client only (reliable).
+    internal static void SendToMaster(byte code, object? data) => RaiseEvent(code, data, null, true, true);
+
+    // Sends an event to a single actor by actor number (reliable).
+    internal static void SendToActor(byte code, object? data, int actorNumber) =>
+        RaiseEvent(code, data, new[] { actorNumber }, true, false);
+
+    // Internal trampoline target invoked by the dynamic delegate; unboxes the EventData.
+    private static void DispatchEvent(object eventData)
+    {
+        if (_userHandler == null || eventData == null) return;
+        try
+        {
+            byte code = Convert.ToByte(ReadMember(_evCodeMember, eventData) ?? (byte)0);
+            object? content = ReadMember(_evCustomDataMember, eventData);
+            int sender = Convert.ToInt32(ReadMember(_evSenderMember, eventData) ?? -1);
+            // Only log our own event range to avoid spamming on every game packet.
+            if (code >= 173 && code <= 180)
+                Plugin.Log.LogInfo($"[PhotonNet] <- event {code} from actor {sender}");
+            _userHandler(code, content, sender);
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[PhotonNet] Dispatch error: {ex.Message}");
+        }
+    }
+
+    private static void RaiseEvent(byte code, object? data, int[]? targetActors, bool reliable, bool toMasterOnly)
+    {
+        try
+        {
+            if (PN == null || RaiseOpts == null || SendOpts == null)
+            {
+                Plugin.Log.LogWarning($"[PhotonNet] RaiseEvent({code}) skipped: PN={PN != null} Opts={RaiseOpts != null} Send={SendOpts != null}.");
+                return;
+            }
+            if (_raiseEventMethod == null)
+            {
+                foreach (MethodInfo m in PN.GetMethods(BindingFlags.Public | BindingFlags.Static))
+                {
+                    if (m.Name != "RaiseEvent") continue;
+                    ParameterInfo[] p = m.GetParameters();
+                    if (p.Length == 4 && p[0].ParameterType == typeof(byte))
+                    {
+                        _raiseEventMethod = m;
+                        break;
+                    }
+                }
+            }
+            if (_raiseEventMethod == null)
+            {
+                Plugin.Log.LogWarning("[PhotonNet] PhotonNetwork.RaiseEvent overload not found.");
+                return;
+            }
+
+            object? opts = Activator.CreateInstance(RaiseOpts);
+            if (opts == null) return;
+            if (targetActors != null)
+            {
+                FieldInfo? f = RaiseOpts.GetField("TargetActors");
+                if (f != null) f.SetValue(opts, targetActors);
+            }
+            else if (toMasterOnly && ReceiverGroup != null)
+            {
+                FieldInfo? f = RaiseOpts.GetField("Receivers");
+                if (f != null) f.SetValue(opts, Enum.ToObject(ReceiverGroup, (byte)2));
+            }
+            else if (ReceiverGroup != null)
+            {
+                FieldInfo? f = RaiseOpts.GetField("Receivers");
+                if (f != null) f.SetValue(opts, Enum.ToObject(ReceiverGroup, (byte)0));
+            }
+
+            FieldInfo? sendField = SendOpts.GetField(reliable ? "SendReliable" : "SendUnreliable",
+                BindingFlags.Public | BindingFlags.Static);
+            object send = sendField != null ? sendField.GetValue(null)! : Activator.CreateInstance(SendOpts)!;
+
+            object? rv = _raiseEventMethod.Invoke(null, new object?[] { code, data, opts, send });
+            if (code >= 173 && code <= 180)
+            {
+                string target = targetActors != null ? $"actor {targetActors[0]}"
+                    : toMasterOnly ? "master" : "others";
+                Plugin.Log.LogInfo($"[PhotonNet] -> event {code} to {target} (returned {rv})");
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[PhotonNet] RaiseEvent({code}) failed: {ex.Message}");
+        }
     }
 }

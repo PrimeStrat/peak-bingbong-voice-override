@@ -2,139 +2,275 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
-using System.Net;
 using System.Text;
-using System.Threading;
 using UnityEngine;
 namespace BingBongVoiceOverride;
 
-// HTTP-based sound sync server (host) and downloader (client). Host serves .ogg/.wav files on port 28472; clients download missing files on join and refresh automatically.
+// Photon-based sound sync. The master client (host) serves audio files; non-master clients
+// pull missing files. All transport rides on Photon RaiseEvent so it works through Photon's
+// relay just like normal game traffic - no LAN, no HTTP server, no firewall holes required.
 internal static class BingBongNetworkSync
 {
-    /// Human-readable server/sync state shown in the debug overlay.
+    private const byte EV_REQ_LIST = 173;
+    private const byte EV_FILE_LIST = 174;
+    private const byte EV_REQ_FILE = 175;
+    private const byte EV_FILE_CHUNK = 176;
+    private const byte EV_CONFIRM_HAVE = 177;
+    private const byte EV_SIGNAL = 178;
+    private const byte EV_REQ_SEL = 179;
+    private const byte EV_SELECTION = 180;
+
+    private const byte SIG_REFRESH = 1;
+    private const byte SIG_STOP = 2;
+
+    private const int CHUNK_SIZE = 64 * 1024;
+
+    // Human-readable transport state shown in menus and overlay.
     internal static string StatusText = "idle";
 
-    /// True when the local player is running the HTTP sound-sync server (is the session host).
+    // True when the local player is the master client and acting as the sound host.
     internal static bool IsHosting => _running;
 
-    /// The host IP address this client is syncing from. Empty when not connected as a client.
-    internal static string ActiveHostAddress => _activeHostAddress;
+    // True when the local player is in a room as a non-master client and has been linked to the host.
+    internal static bool IsConnectedAsClient => !_running && _hostJoined;
 
-    /// True when the host has set AllowClientImports, updated via status polling.
+    // True when the host allows clients to upload new sounds, mirrored from host status broadcasts.
     internal static bool HostAllowsClientImports = false;
 
-    private static HttpListener? _listener;
-    private static Thread? _serverThread;
+    // Reserved for menu code that previously displayed the host IP. Always empty under Photon transport.
+    internal static string ActiveHostAddress => _hostJoined ? "photon" : string.Empty;
+
+    // True after the client has received any event from the host this session.
+    internal static bool HasReachedHost => _hasReachedHost;
+
+    // True when the most recent client sync attempt failed and is awaiting retry.
+    internal static bool ClientSyncFailed => _syncFailed;
+
+    // True while a client sync is downloading or the host is waiting for a client to confirm files.
+    internal static bool IsSyncBusy =>
+        _clientSyncRunning ||
+        (IsHosting && _lobbyPlayerNames.Count > 0 && GetUnsyncedPlayerNames().Count > 0);
+
     private static bool _running = false;
+    private static bool _hostJoined = false;
+    private static bool _clientSyncRunning = false;
+    private static bool _syncFailed = false;
+    private static bool _hasReachedHost = false;
+
     private static readonly object _syncLock = new();
-    private static readonly HashSet<string> _knownClients = new(StringComparer.OrdinalIgnoreCase);
+
+    // Lobby (host-side) tracking by Photon NickName.
+    private static readonly HashSet<string> _lobbyPlayerNames = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, HashSet<string>> _playerSyncedFileNames =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    // Per-actor download tracking (host-side).
+    private static readonly HashSet<int> _knownActors = new();
+    private static readonly Dictionary<int, string> _actorNames = new();
+    private static readonly Dictionary<int, HashSet<string>> _actorDownloadedFiles = new();
     private static readonly Dictionary<string, HashSet<string>> _pendingImportedFileClients =
         new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, HashSet<string>> _clientDownloadedFiles =
-        new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, string> _clientDisplayNames =
-        new(StringComparer.OrdinalIgnoreCase);
-    private static string _activeHostAddress = string.Empty;
-    private static bool _clientAutoSyncRunning = false;
-    private static int _stopGeneration = 0;
-    private static int _lastSeenStopGen = -1;
-    private static int _refreshGeneration = 0;
-    private static int _lastSeenRefreshGen = -1;
 
-    // Starts the HTTP sound-sync server so clients that join can pull .ogg files from this host.
+    // Incoming chunk buffers keyed by "senderActor:fileName".
+    private static readonly Dictionary<string, byte[][]> _chunkBuffers = new();
+    private static readonly Dictionary<string, int> _chunkExpected = new();
+
+    // Client-side file list received from the host.
+    private static List<(string name, long size)>? _hostFileList = null;
+    // Files the client is still waiting to download (set populated when the file list arrives).
+    private static readonly HashSet<string> _clientPendingFiles = new(StringComparer.OrdinalIgnoreCase);
+    // Selection JSON bytes most recently received from the host (consumed by the sync coroutine).
+    private static byte[]? _pendingSelectionBytes = null;
+
+    // Subscribes to Photon events and marks this client as the sound host.
     // returns: void
     internal static void StartServer()
     {
         if (_running) return;
-
-        _listener = new HttpListener();
-        bool bound = TryBind("http://+:28472/bingbong/") || TryBind("http://localhost:28472/bingbong/");
-
-        if (!bound)
+        if (!Patches.PhotonNet.IsAvailable)
         {
-            StatusText = "server unavailable";
-            Plugin.Log.LogWarning("Could not start sound sync server on port 28472.");
+            StatusText = "photon unavailable";
+            Plugin.Log.LogWarning("[Sync] Photon runtime not found; sync disabled.");
             return;
         }
-
         _running = true;
-        _serverThread = new Thread(ServeLoop) { IsBackground = true, Name = "BingBongSoundServer" };
-        _serverThread.Start();
-        Plugin.Log.LogInfo($"Sound sync server started. ({StatusText})");
+        Patches.PhotonNet.Subscribe(OnPhotonEvent);
+        StatusText = "hosting (photon)";
+        Plugin.Log.LogInfo("[Sync] Photon sync host active.");
     }
 
-    // Stops the HTTP sound-sync server.
+    // Tears down host state and unsubscribes from Photon events.
     // returns: void
     internal static void StopServer()
     {
         _running = false;
-        _clientAutoSyncRunning = false;
-        try { _listener?.Stop(); } catch (Exception) { }
+        _hostJoined = false;
+        _hasReachedHost = false;
         StatusText = "idle";
-    }
-
-    // Increments the stop generation counter so connected clients clear their timed subtitle state on the next poll.
-    // returns: void
-    internal static void BroadcastStop()
-    {
-        Interlocked.Increment(ref _stopGeneration);
-    }
-
-    // Increments the refresh generation counter so connected clients trigger a sound refresh on the next poll.
-    // returns: void
-    internal static void BroadcastRefresh()
-    {
-        Interlocked.Increment(ref _refreshGeneration);
-    }
-
-    // Uploads a file from the local sounds folder to the host server. Only runs when AllowClientImports is true on the host.
-    // fileName (string): file name including extension to upload from the local sounds folder
-    // hostAddress (string): LAN IP address of the session host
-    // returns: IEnumerator
-    internal static IEnumerator UploadFileToHost(string fileName, string hostAddress)
-    {
-        string filePath = Path.Combine(Plugin.SoundsFolder, fileName);
-        if (!File.Exists(filePath)) yield break;
-
-        byte[] data = File.ReadAllBytes(filePath);
-        string url = $"http://{hostAddress}:28472/bingbong/upload?name={Uri.EscapeDataString(fileName)}";
-        string localName = Plugin.GetLocalPlayerName();
-        bool success = false;
-        string? error = null;
-        yield return NetPost(url, data, "application/octet-stream", localName, (ok, err) => { success = ok; error = err; });
-
-        if (success)
-            Plugin.Log.LogInfo($"[Upload] Sent '{fileName}' to host.");
-        else
-            Plugin.Log.LogWarning($"[Upload] Failed to send '{fileName}': {error}");
-    }
-
-    // Call this from a Harmony patch on the game's player-join event. Downloads missing sound/subtitle files from the host then triggers a refresh.
-    // hostAddress (string): LAN IP address of the session host
-    // returns: void
-    internal static void OnPlayerJoined(string hostAddress)
-    {
-        if (hostAddress == GetLocalIpAddress() || hostAddress == "127.0.0.1") return;
-        _activeHostAddress = hostAddress;
-        Plugin.Instance.StartCoroutine(DownloadSoundsFromHost(hostAddress));
-        if (!_clientAutoSyncRunning)
+        Patches.PhotonNet.Unsubscribe();
+        lock (_syncLock)
         {
-            _clientAutoSyncRunning = true;
-            Plugin.Instance.StartCoroutine(ClientAutoSyncLoop());
+            _lobbyPlayerNames.Clear();
+            _playerSyncedFileNames.Clear();
+            _knownActors.Clear();
+            _actorNames.Clear();
+            _actorDownloadedFiles.Clear();
+            _pendingImportedFileClients.Clear();
+            _chunkBuffers.Clear();
+            _chunkExpected.Clear();
+            _clientPendingFiles.Clear();
+            _hostFileList = null;
+            _pendingSelectionBytes = null;
         }
     }
 
-    // Registers a newly imported file and starts waiting for all known clients to fetch it.
+    // Tells every connected client to clear timed subtitle state.
+    // returns: void
+    internal static void BroadcastStop()
+    {
+        if (!_running) return;
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, new byte[] { SIG_STOP });
+    }
+
+    // Tells every connected client to re-pull files and refresh.
+    // returns: void
+    internal static void BroadcastRefresh()
+    {
+        if (!_running) return;
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, new byte[] { SIG_REFRESH });
+    }
+
+    // Sends a locally imported file to the host as a chunked Photon upload.
+    // fileName (string): file name including extension to upload from the local sounds folder
+    // _hostAddressIgnored (string): legacy parameter; transport now uses Photon master client routing
+    // returns: IEnumerator
+    internal static IEnumerator UploadFileToHost(string fileName, string _hostAddressIgnored)
+    {
+        string filePath = Path.Combine(Plugin.SoundsFolder, fileName);
+        if (!File.Exists(filePath)) yield break;
+        byte[] data = File.ReadAllBytes(filePath);
+        SendFileChunked(fileName, data, Patches.PhotonNet.MasterActorNumber);
+        yield break;
+    }
+
+    // Marks the local player as connected to the host and triggers the initial sync. Called
+    // from the Harmony OnJoinedRoom postfix when the local player is not the master client.
+    // _hostAddressIgnored (string): legacy parameter; ignored under Photon transport
+    // returns: void
+    internal static void OnPlayerJoined(string _hostAddressIgnored)
+    {
+        if (!Patches.PhotonNet.IsAvailable)
+        {
+            StatusText = "photon unavailable";
+            return;
+        }
+        _hostJoined = true;
+        _syncFailed = false;
+        Patches.PhotonNet.Subscribe(OnPhotonEvent);
+        TriggerClientSync();
+    }
+
+    // Legacy entry point retained for menu compatibility. Photon transport does not need polling.
+    // returns: void
+    internal static void StartClientPollLoop() { }
+
+    // Adds a player to the lobby tracking list. Called from NetworkSyncPatches on Photon player-join.
+    // playerName (string): Photon NickName of the player who joined
+    // returns: void
+    internal static void OnPhotonPlayerJoined(string playerName)
+    {
+        if (string.IsNullOrWhiteSpace(playerName)) return;
+        lock (_syncLock)
+            _lobbyPlayerNames.Add(playerName);
+        Plugin.Log.LogInfo($"[Sync] Lobby player joined: '{playerName}'");
+    }
+
+    // Removes a player from the lobby tracking list. Called from NetworkSyncPatches on Photon player-leave.
+    // playerName (string): Photon NickName of the player who left
+    // returns: void
+    internal static void OnPhotonPlayerLeft(string playerName)
+    {
+        if (string.IsNullOrWhiteSpace(playerName)) return;
+        lock (_syncLock)
+        {
+            _lobbyPlayerNames.Remove(playerName);
+            _playerSyncedFileNames.Remove(playerName);
+        }
+        Plugin.Log.LogInfo($"[Sync] Lobby player left: '{playerName}'");
+    }
+
+    // Resets failure state and either re-broadcasts to clients (host) or kicks off a fresh sync (client).
+    // returns: void
+    internal static void AllowResync()
+    {
+        _syncFailed = false;
+        if (IsHosting)
+        {
+            lock (_syncLock)
+                _playerSyncedFileNames.Clear();
+            BroadcastRefresh();
+        }
+        if (IsConnectedAsClient)
+            TriggerClientSync();
+    }
+
+    // Starts a one-shot client sync coroutine if one is not already running.
+    // returns: void
+    internal static void TriggerClientSync()
+    {
+        if (_syncFailed || _clientSyncRunning || !_hostJoined) return;
+        _clientSyncRunning = true;
+        Plugin.Instance.StartCoroutine(RunClientSync());
+    }
+
+    // Returns the names of lobby players who have not yet downloaded all served audio files.
+    // returns: List<string>
+    internal static List<string> GetUnsyncedPlayerNames()
+    {
+        int totalFiles = GetServedAudioFileCount();
+        lock (_syncLock)
+        {
+            List<string> result = new();
+            foreach (string name in _lobbyPlayerNames)
+            {
+                HashSet<string>? synced;
+                if (!_playerSyncedFileNames.TryGetValue(name, out synced) || synced.Count < totalFiles)
+                    result.Add(name);
+            }
+            return result;
+        }
+    }
+
+    // Returns true when every known lobby player has downloaded the given clip. Only relevant on the host.
+    // clipName (string): clip name without extension
+    // returns: bool
+    internal static bool IsClipSyncedToAllClients(string clipName)
+    {
+        if (!_running) return true;
+        lock (_syncLock)
+        {
+            if (_lobbyPlayerNames.Count == 0) return true;
+            string? fileName = ResolveAudioFileName(clipName);
+            if (fileName == null) return true;
+            foreach (string playerName in _lobbyPlayerNames)
+            {
+                HashSet<string>? synced;
+                if (!_playerSyncedFileNames.TryGetValue(playerName, out synced) || !synced.Contains(fileName))
+                    return false;
+            }
+            return true;
+        }
+    }
+
+    // Registers a newly imported file and waits for all known clients to fetch it.
     // fileName (string): imported file name including extension
     // returns: void
     internal static void RegisterImportedFile(string fileName)
     {
-        if (string.IsNullOrWhiteSpace(fileName))
-            return;
-
+        if (string.IsNullOrWhiteSpace(fileName)) return;
         lock (_syncLock)
         {
-            HashSet<string> waiting = new(_knownClients, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> waiting = new(_lobbyPlayerNames, StringComparer.OrdinalIgnoreCase);
             _pendingImportedFileClients[fileName] = waiting;
         }
     }
@@ -147,8 +283,7 @@ internal static class BingBongNetworkSync
         lock (_syncLock)
         {
             HashSet<string> waiting;
-            if (!_pendingImportedFileClients.TryGetValue(fileName, out waiting))
-                return true;
+            if (!_pendingImportedFileClients.TryGetValue(fileName, out waiting)) return true;
             if (waiting.Count == 0)
             {
                 _pendingImportedFileClients.Remove(fileName);
@@ -166,8 +301,7 @@ internal static class BingBongNetworkSync
         lock (_syncLock)
         {
             HashSet<string> waiting;
-            if (!_pendingImportedFileClients.TryGetValue(fileName, out waiting))
-                return 0;
+            if (!_pendingImportedFileClients.TryGetValue(fileName, out waiting)) return 0;
             return waiting.Count;
         }
     }
@@ -184,17 +318,29 @@ internal static class BingBongNetworkSync
         catch (Exception) { return 0; }
     }
 
+    // Returns how many files have been confirmed synced for the given player (by Photon display name).
+    // playerName (string): the player's Photon NickName as stored in _lobbyPlayerNames
+    // returns: int - number of files recorded as synced for that player
+    internal static int GetPlayerSyncedFileCount(string playerName)
+    {
+        lock (_syncLock)
+        {
+            return _playerSyncedFileNames.TryGetValue(playerName, out HashSet<string> s) ? s.Count : 0;
+        }
+    }
+
     // Returns per-client download counts as a snapshot.
     // returns: List<(string displayName, int count)> - downloaded file count per known client
     internal static List<(string displayName, int count)> GetClientDownloadCounts()
     {
         lock (_syncLock)
         {
-            List<(string, int)> result = new(_knownClients.Count);
-            foreach (string ip in _knownClients)
+            List<(string, int)> result = new(_knownActors.Count);
+            foreach (int actor in _knownActors)
             {
-                string name = _clientDisplayNames.TryGetValue(ip, out string n) && !string.IsNullOrWhiteSpace(n) ? n : ip;
-                int c = _clientDownloadedFiles.TryGetValue(ip, out HashSet<string> f) ? f.Count : 0;
+                string name = _actorNames.TryGetValue(actor, out string n) && !string.IsNullOrWhiteSpace(n)
+                    ? n : $"actor#{actor}";
+                int c = _actorDownloadedFiles.TryGetValue(actor, out HashSet<string> f) ? f.Count : 0;
                 result.Add((name, c));
             }
             return result;
@@ -214,110 +360,395 @@ internal static class BingBongNetworkSync
         }
     }
 
-    private static bool TryBind(string prefix)
+    // Returns null when no audio file matches the clip name in the local sounds folder.
+    private static string? ResolveAudioFileName(string clipName)
     {
-        try
+        foreach (string ext in new[] { ".ogg", ".wav" })
         {
-            _listener!.Prefixes.Clear();
-            _listener.Prefixes.Add(prefix);
-            _listener.Start();
-            StatusText = prefix.Contains("+") ? "hosting *:28472" : "hosting localhost:28472";
-            return true;
+            if (File.Exists(Path.Combine(Plugin.SoundsFolder, clipName + ext)))
+                return clipName + ext;
         }
-        catch (Exception ex)
-        {
-            Plugin.Log.LogWarning($"Bind failed for {prefix}: {ex.Message}");
-            return false;
-        }
+        return null;
     }
 
-    private static IEnumerator DownloadSoundsFromHost(string hostAddress)
+    // Coroutine that drives a single client sync round-trip.
+    private static IEnumerator RunClientSync()
     {
-        StatusText = $"syncing from {hostAddress}";
-        Plugin.Log.LogInfo($"Fetching sound list from host {hostAddress}...");
+        StatusText = "syncing (photon)";
+        _hostFileList = null;
+        Patches.PhotonNet.SendToMaster(EV_REQ_LIST, null);
 
-        string localName = Plugin.GetLocalPlayerName();
-        byte[]? listBytes = null;
-        string? listError = null;
-        yield return NetGet($"http://{hostAddress}:28472/bingbong/list", localName,
-            (b, e) => { listBytes = b; listError = e; });
-
-        if (listBytes == null)
+        float waited = 0f;
+        while (_hostFileList == null && waited < 15f)
         {
-            StatusText = "sync failed";
-            Plugin.Log.LogWarning($"Could not reach host sound server: {listError}");
+            waited += Time.unscaledDeltaTime;
+            yield return null;
+        }
+        if (_hostFileList == null)
+        {
+            _syncFailed = true;
+            _clientSyncRunning = false;
+            StatusText = "sync failed (no host response)";
+            Plugin.Log.LogWarning("[Sync] No file list received from host within 15s.");
             yield break;
         }
 
-        string[] fileNames = Encoding.UTF8.GetString(listBytes)
-            .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-        int downloaded = 0;
         long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
-        foreach (string fileName in fileNames)
+        List<string> needed = new();
+        foreach ((string name, long size) in _hostFileList)
         {
-            string entry = fileName.Trim();
-            if (string.IsNullOrEmpty(entry)) continue;
-
-            string name;
-            long sizeBytes = -1L;
-            int sep = entry.IndexOf('|');
-            if (sep > 0)
+            string ext = Path.GetExtension(name).ToLowerInvariant();
+            bool isAudio = ext == ".ogg" || ext == ".wav";
+            if (isAudio && size > 0L && size > maxBytes)
             {
-                name = entry.Substring(0, sep).Trim();
-                long.TryParse(entry.Substring(sep + 1).Trim(), out sizeBytes);
+                Plugin.Log.LogInfo($"  Skipping '{name}' ({size / 1024L} KB > {Plugin.MaxSyncFileSizeKb.Value} KB).");
+                continue;
+            }
+            bool isJson = ext == ".json";
+            if (!isJson && File.Exists(Path.Combine(Plugin.SoundsFolder, name))) continue;
+            needed.Add(name);
+        }
+
+        lock (_syncLock)
+        {
+            _clientPendingFiles.Clear();
+            foreach (string n in needed) _clientPendingFiles.Add(n);
+        }
+
+        foreach (string name in needed)
+            Patches.PhotonNet.SendToMaster(EV_REQ_FILE, name);
+
+        // Wait for every requested chunk stream to complete, with an overall timeout.
+        float dlElapsed = 0f;
+        float perFileTimeoutBudget = Math.Max(30f, needed.Count * 30f);
+        while (true)
+        {
+            int remaining;
+            lock (_syncLock) remaining = _clientPendingFiles.Count;
+            if (remaining == 0) break;
+            if (dlElapsed >= perFileTimeoutBudget)
+            {
+                Plugin.Log.LogWarning($"[Sync] Download timeout - {remaining} file(s) never completed.");
+                break;
+            }
+            StatusText = $"downloading ({needed.Count - remaining}/{needed.Count})";
+            dlElapsed += Time.unscaledDeltaTime;
+            yield return null;
+        }
+
+        // Confirm every file we have on disk that the host advertises.
+        List<string> presentFiles = new();
+        foreach ((string name, long _) in _hostFileList)
+        {
+            string ext = Path.GetExtension(name).ToLowerInvariant();
+            if ((ext == ".ogg" || ext == ".wav") && File.Exists(Path.Combine(Plugin.SoundsFolder, name)))
+                presentFiles.Add(name);
+        }
+        if (presentFiles.Count > 0)
+            Patches.PhotonNet.SendToMaster(EV_CONFIRM_HAVE, presentFiles.ToArray());
+
+        // Pull selection.json.
+        _pendingSelectionBytes = null;
+        Patches.PhotonNet.SendToMaster(EV_REQ_SEL, null);
+        float selWait = 0f;
+        while (_pendingSelectionBytes == null && selWait < 5f)
+        {
+            selWait += Time.unscaledDeltaTime;
+            yield return null;
+        }
+        if (_pendingSelectionBytes != null)
+            ApplySelectionJson(_pendingSelectionBytes);
+
+        StatusText = "in sync";
+        _clientSyncRunning = false;
+        if (!Plugin.IsRefreshPending)
+            Plugin.Instance.StartRefresh();
+    }
+
+    // Photon event dispatcher. Runs on the Unity main thread.
+    private static void OnPhotonEvent(byte code, object? data, int senderActor)
+    {
+        try
+        {
+            switch (code)
+            {
+                case EV_REQ_LIST: HandleReqList(senderActor); break;
+                case EV_FILE_LIST: HandleFileList(data); break;
+                case EV_REQ_FILE: HandleReqFile(data, senderActor); break;
+                case EV_FILE_CHUNK: HandleFileChunk(data, senderActor); break;
+                case EV_CONFIRM_HAVE: HandleConfirmHave(data, senderActor); break;
+                case EV_SIGNAL: HandleSignal(data); break;
+                case EV_REQ_SEL: HandleReqSelection(senderActor); break;
+                case EV_SELECTION: HandleSelection(data); break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[Sync] Event {code} handler error: {ex.Message}");
+        }
+    }
+
+    private static void HandleReqList(int senderActor)
+    {
+        if (!_running) return;
+        TrackActor(senderActor);
+        long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
+        List<string> entries = new();
+        try
+        {
+            foreach (string f in Directory.GetFiles(Plugin.SoundsFolder, "*.ogg", SearchOption.TopDirectoryOnly))
+            {
+                long size = new FileInfo(f).Length;
+                if (size > maxBytes) continue;
+                entries.Add($"{Path.GetFileName(f)}|{size}");
+            }
+            foreach (string f in Directory.GetFiles(Plugin.SoundsFolder, "*.wav", SearchOption.TopDirectoryOnly))
+            {
+                long size = new FileInfo(f).Length;
+                if (size > maxBytes) continue;
+                entries.Add($"{Path.GetFileName(f)}|{size}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[Sync] Building file list failed: {ex.Message}");
+        }
+        Patches.PhotonNet.SendToActor(EV_FILE_LIST, entries.ToArray(), senderActor);
+    }
+
+    private static void HandleFileList(object? data)
+    {
+        if (data is not string[] entries) return;
+        _hasReachedHost = true;
+        List<(string, long)> list = new(entries.Length);
+        foreach (string entry in entries)
+        {
+            string e = entry?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(e)) continue;
+            int sep = e.IndexOf('|');
+            string name = sep > 0 ? e.Substring(0, sep).Trim() : e;
+            long size = -1L;
+            if (sep > 0) long.TryParse(e.Substring(sep + 1).Trim(), out size);
+            if (!string.IsNullOrEmpty(name)) list.Add((name, size));
+        }
+        _hostFileList = list;
+    }
+
+    private static void HandleReqFile(object? data, int senderActor)
+    {
+        if (!_running || data is not string fileName) return;
+        if (string.IsNullOrEmpty(fileName) || fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return;
+        string filePath = Path.GetFullPath(Path.Combine(Plugin.SoundsFolder, fileName));
+        string root = Path.GetFullPath(Plugin.SoundsFolder);
+        if (!filePath.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(filePath)) return;
+        long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
+        if (new FileInfo(filePath).Length > maxBytes) return;
+        byte[] bytes = File.ReadAllBytes(filePath);
+        SendFileChunked(fileName, bytes, senderActor);
+    }
+
+    private static void HandleFileChunk(object? data, int senderActor)
+    {
+        if (data is not object[] arr || arr.Length < 4) return;
+        string? fileName = arr[0] as string;
+        if (string.IsNullOrEmpty(fileName)) return;
+        int idx = Convert.ToInt32(arr[1]);
+        int total = Convert.ToInt32(arr[2]);
+        byte[]? payload = arr[3] as byte[];
+        if (payload == null || idx < 0 || total <= 0 || idx >= total) return;
+
+        string key = $"{senderActor}:{fileName}";
+        byte[][] buffer;
+        bool complete;
+        lock (_syncLock)
+        {
+            if (!_chunkBuffers.TryGetValue(key, out buffer))
+            {
+                buffer = new byte[total][];
+                _chunkBuffers[key] = buffer;
+                _chunkExpected[key] = total;
+            }
+            buffer[idx] = payload;
+            complete = AllChunksPresent(buffer);
+        }
+        if (!complete) return;
+
+        // Reassemble.
+        int totalLen = 0;
+        for (int i = 0; i < buffer.Length; i++) totalLen += buffer[i].Length;
+        byte[] full = new byte[totalLen];
+        int off = 0;
+        for (int i = 0; i < buffer.Length; i++)
+        {
+            Buffer.BlockCopy(buffer[i], 0, full, off, buffer[i].Length);
+            off += buffer[i].Length;
+        }
+        lock (_syncLock)
+        {
+            _chunkBuffers.Remove(key);
+            _chunkExpected.Remove(key);
+        }
+
+        try
+        {
+            string destPath = Path.GetFullPath(Path.Combine(Plugin.SoundsFolder, fileName!));
+            string root = Path.GetFullPath(Plugin.SoundsFolder);
+            if (!destPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return;
+
+            string ext = Path.GetExtension(fileName).ToLowerInvariant();
+            if (_running)
+            {
+                // Treat any chunk arriving at the host as a client upload (only if allowed).
+                if (Plugin.AllowClientImports == null || !Plugin.AllowClientImports.Value) return;
+                if (ext != ".ogg" && ext != ".wav" && ext != ".json") return;
+                File.WriteAllBytes(destPath, full);
+                Plugin.Log.LogInfo($"[Sync] Received uploaded '{fileName}' from actor {senderActor}.");
+                Plugin.Instance?.StartRefresh();
             }
             else
             {
-                name = entry;
+                File.WriteAllBytes(destPath, full);
+                Plugin.Log.LogInfo($"[Sync] Synced: {fileName}");
+                lock (_syncLock) _clientPendingFiles.Remove(fileName);
             }
-            if (string.IsNullOrEmpty(name)) continue;
-
-            string ext = Path.GetExtension(name).ToLowerInvariant();
-            bool isAudio = ext == ".ogg" || ext == ".wav";
-            if (isAudio && sizeBytes > 0L && sizeBytes > maxBytes)
-            {
-                Plugin.Log.LogInfo($"  Skipping '{name}' ({sizeBytes / 1024L} KB > {Plugin.MaxSyncFileSizeKb.Value} KB).");
-                continue;
-            }
-
-            string destPath = Path.Combine(Plugin.SoundsFolder, name);
-            if (File.Exists(destPath)) continue;
-
-            byte[]? fileBytes = null;
-            string? fileError = null;
-            yield return NetGet(
-                $"http://{hostAddress}:28472/bingbong/file/{Uri.EscapeDataString(name)}",
-                localName, (b, e) => { fileBytes = b; fileError = e; });
-
-            if (fileBytes == null)
-            {
-                Plugin.Log.LogWarning($"Failed to download '{name}': {fileError}");
-                continue;
-            }
-
-            File.WriteAllBytes(destPath, fileBytes);
-            Plugin.Log.LogInfo($"  Synced: {name}");
-            downloaded++;
         }
-
-        StatusText = downloaded > 0 ? $"synced {downloaded} file(s)" : "in sync";
-
-        if (downloaded > 0)
-            Plugin.Instance.StartRefresh();
-
-        yield return Plugin.Instance.StartCoroutine(SyncSelectionFromHost(hostAddress));
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[Sync] Write failed for '{fileName}': {ex.Message}");
+        }
     }
 
-    private static IEnumerator SyncSelectionFromHost(string hostAddress)
+    private static bool AllChunksPresent(byte[][] buffer)
     {
-        byte[]? bytes = null;
-        yield return NetGet(
-            $"http://{hostAddress}:28472/bingbong/file/{Uri.EscapeDataString("selection.json")}",
-            Plugin.GetLocalPlayerName(), (b, _) => { bytes = b; });
+        for (int i = 0; i < buffer.Length; i++)
+            if (buffer[i] == null) return false;
+        return true;
+    }
 
-        if (bytes == null) yield break;
+    private static void HandleConfirmHave(object? data, int senderActor)
+    {
+        if (!_running || data is not string[] names) return;
+        TrackActor(senderActor);
+        foreach (string name in names)
+        {
+            if (!string.IsNullOrEmpty(name))
+                RecordActorDownload(name, senderActor);
+        }
+    }
 
+    private static void HandleSignal(object? data)
+    {
+        if (data is not byte[] bytes || bytes.Length == 0) return;
+        switch (bytes[0])
+        {
+            case SIG_REFRESH:
+                _syncFailed = false;
+                TriggerClientSync();
+                break;
+            case SIG_STOP:
+                Plugin.ClearTimedSubtitles();
+                break;
+        }
+    }
+
+    private static void HandleReqSelection(int senderActor)
+    {
+        if (!_running) return;
+        TrackActor(senderActor);
+        try
+        {
+            string selPath = Path.Combine(Plugin.SoundsFolder, "selection.json");
+            if (!File.Exists(selPath)) return;
+            byte[] bytes = File.ReadAllBytes(selPath);
+            Patches.PhotonNet.SendToActor(EV_SELECTION, bytes, senderActor);
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogWarning($"[Sync] Selection serve failed: {ex.Message}");
+        }
+    }
+
+    private static void HandleSelection(object? data)
+    {
+        if (data is byte[] bytes) _pendingSelectionBytes = bytes;
+    }
+
+    // Splits a file into Photon-sized chunks and dispatches each to the target actor.
+    private static void SendFileChunked(string fileName, byte[] bytes, int targetActor)
+    {
+        if (targetActor < 0) return;
+        int total = Math.Max(1, (int)Math.Ceiling(bytes.Length / (double)CHUNK_SIZE));
+        for (int i = 0; i < total; i++)
+        {
+            int off = i * CHUNK_SIZE;
+            int len = Math.Min(CHUNK_SIZE, bytes.Length - off);
+            byte[] slice = new byte[len];
+            Buffer.BlockCopy(bytes, off, slice, 0, len);
+            object[] payload = new object[] { fileName, i, total, slice };
+            Patches.PhotonNet.SendToActor(EV_FILE_CHUNK, payload, targetActor);
+        }
+    }
+
+    // Tracks an actor and updates the synced file map for their NickName.
+    private static void RecordActorDownload(string fileName, int actor)
+    {
+        string displayName;
+        int fileCount;
+        lock (_syncLock)
+        {
+            HashSet<string> files;
+            if (!_actorDownloadedFiles.TryGetValue(actor, out files))
+            {
+                files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _actorDownloadedFiles[actor] = files;
+            }
+            files.Add(fileName);
+            fileCount = files.Count;
+            displayName = _actorNames.TryGetValue(actor, out string n) && !string.IsNullOrWhiteSpace(n)
+                ? n : $"actor#{actor}";
+            if (!string.IsNullOrEmpty(displayName))
+            {
+                if (!_playerSyncedFileNames.TryGetValue(displayName, out HashSet<string> namedFiles))
+                {
+                    namedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _playerSyncedFileNames[displayName] = namedFiles;
+                }
+                namedFiles.Add(fileName);
+            }
+            if (_pendingImportedFileClients.TryGetValue(fileName, out HashSet<string> waiting))
+            {
+                waiting.Remove(displayName);
+            }
+        }
+        Plugin.Log.LogInfo($"[Sync] {displayName} confirmed '{fileName}' (now has {fileCount} file(s) from this host)");
+    }
+
+    // Resolves a sender actor's NickName via Photon and stores it. Also auto-registers them in the
+    // lobby tracking list so the host still works when PEAK's PlayerConnectionLog hook never fires.
+    private static void TrackActor(int actor)
+    {
+        if (actor < 0) return;
+        string name = Patches.PhotonNet.GetNickNameForActor(actor);
+        bool added = false;
+        lock (_syncLock)
+        {
+            _knownActors.Add(actor);
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                _actorNames[actor] = name;
+                if (!_lobbyPlayerNames.Contains(name))
+                {
+                    _lobbyPlayerNames.Add(name);
+                    added = true;
+                }
+            }
+        }
+        if (added)
+            Plugin.Log.LogInfo($"[Sync] Auto-registered actor {actor} as '{name}' (via incoming Photon event).");
+    }
+
+    private static void ApplySelectionJson(byte[] bytes)
+    {
         try
         {
             string raw = Encoding.UTF8.GetString(bytes);
@@ -335,362 +766,5 @@ internal static class BingBongNetworkSync
         {
             Plugin.Log.LogWarning($"[Sync] selection.json parse failed: {ex.Message}");
         }
-    }
-
-    private static IEnumerator NetGet(string url, string playerName, Action<byte[]?, string?> onDone)
-    {
-        byte[]? result = null;
-        string? error = null;
-        bool done = false;
-        ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try
-            {
-                using System.Net.WebClient wc = new System.Net.WebClient();
-                if (!string.IsNullOrEmpty(playerName))
-                    wc.Headers["X-Player-Name"] = playerName;
-                result = wc.DownloadData(url);
-            }
-            catch (Exception ex) { error = ex.Message; }
-            finally { done = true; }
-        });
-        while (!done) yield return null;
-        onDone(result, error);
-    }
-
-    private static IEnumerator NetPost(string url, byte[] data, string contentType, string playerName, Action<bool, string?> onDone)
-    {
-        bool success = false;
-        string? error = null;
-        bool done = false;
-        ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try
-            {
-                using System.Net.WebClient wc = new System.Net.WebClient();
-                wc.Headers["Content-Type"] = contentType;
-                if (!string.IsNullOrEmpty(playerName))
-                    wc.Headers["X-Player-Name"] = playerName;
-                wc.UploadData(url, "POST", data);
-                success = true;
-            }
-            catch (Exception ex) { error = ex.Message; }
-            finally { done = true; }
-        });
-        while (!done) yield return null;
-        onDone(success, error);
-    }
-
-    private static IEnumerator ClientAutoSyncLoop()
-    {
-        while (_clientAutoSyncRunning)
-        {
-            if (!string.IsNullOrWhiteSpace(_activeHostAddress) && Plugin.Instance != null)
-            {
-                yield return Plugin.Instance.StartCoroutine(DownloadSoundsFromHost(_activeHostAddress));
-                yield return Plugin.Instance.StartCoroutine(FetchHostStatus(_activeHostAddress));
-            }
-            yield return new UnityEngine.WaitForSecondsRealtime(2f);
-        }
-    }
-
-    private static IEnumerator FetchHostStatus(string hostAddress)
-    {
-        byte[]? bytes = null;
-        yield return NetGet($"http://{hostAddress}:28472/bingbong/status",
-            Plugin.GetLocalPlayerName(), (b, _) => { bytes = b; });
-
-        if (bytes == null) yield break;
-
-        string body = Encoding.UTF8.GetString(bytes);
-
-        int stopGen = ParseJsonInt(body, "stopGen", -1);
-        if (stopGen >= 0)
-        {
-            if (_lastSeenStopGen >= 0 && stopGen != _lastSeenStopGen)
-                Plugin.ClearTimedSubtitles();
-            _lastSeenStopGen = stopGen;
-        }
-
-        int refreshGen = ParseJsonInt(body, "refreshGen", -1);
-        if (refreshGen >= 0)
-        {
-            if (_lastSeenRefreshGen >= 0 && refreshGen != _lastSeenRefreshGen)
-                Plugin.Instance?.StartRefresh();
-            _lastSeenRefreshGen = refreshGen;
-        }
-
-        int allowImports = ParseJsonInt(body, "allowClientImports", 0);
-        HostAllowsClientImports = allowImports == 1;
-    }
-
-    private static void ServeLoop()
-    {
-        while (_running && _listener != null && _listener.IsListening)
-        {
-            HttpListenerContext context;
-            try
-            {
-                context = _listener.GetContext();
-            }
-            catch (Exception)
-            {
-                break;
-            }
-            ThreadPool.QueueUserWorkItem(_ => HandleRequest(context));
-        }
-    }
-
-    private static void HandleRequest(HttpListenerContext context)
-    {
-        try
-        {
-            string path = context.Request.Url.AbsolutePath;
-            string requesterIp = context.Request.RemoteEndPoint?.Address.ToString() ?? string.Empty;
-            string playerName = context.Request.Headers["X-Player-Name"] ?? string.Empty;
-            TrackClient(requesterIp, playerName);
-            if (path.EndsWith("/list", StringComparison.OrdinalIgnoreCase))
-                ServeFileList(context);
-            else if (path.EndsWith("/status", StringComparison.OrdinalIgnoreCase))
-                ServeStatus(context);
-            else if (path.EndsWith("/upload", StringComparison.OrdinalIgnoreCase)
-                && context.Request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase))
-                HandleUpload(context);
-            else if (path.Contains("/file/"))
-                ServeFile(context, Path.GetFileName(Uri.UnescapeDataString(path)), requesterIp);
-            else
-            {
-                context.Response.StatusCode = 404;
-                context.Response.Close();
-            }
-        }
-        catch (Exception ex)
-        {
-            Plugin.Log.LogWarning($"Sound server request error: {ex.Message}");
-        }
-    }
-
-    private static void ServeStatus(HttpListenerContext context)
-    {
-        int allowImports = Plugin.AllowClientImports != null && Plugin.AllowClientImports.Value ? 1 : 0;
-        string json = $"{{\"stopGen\":{_stopGeneration},\"refreshGen\":{_refreshGeneration},\"allowClientImports\":{allowImports}}}";
-        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(json);
-        context.Response.ContentType = "application/json";
-        context.Response.ContentLength64 = bytes.Length;
-        context.Response.OutputStream.Write(bytes, 0, bytes.Length);
-        context.Response.Close();
-    }
-
-    private static void HandleUpload(HttpListenerContext context)
-    {
-        if (Plugin.AllowClientImports == null || !Plugin.AllowClientImports.Value)
-        {
-            context.Response.StatusCode = 403;
-            context.Response.Close();
-            return;
-        }
-
-        string rawName = context.Request.QueryString["name"] ?? string.Empty;
-        string fileName = Path.GetFileName(rawName);
-        if (string.IsNullOrEmpty(fileName) || fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-        {
-            context.Response.StatusCode = 400;
-            context.Response.Close();
-            return;
-        }
-
-        string ext = Path.GetExtension(fileName).ToLowerInvariant();
-        if (ext != ".ogg" && ext != ".wav" && ext != ".json")
-        {
-            context.Response.StatusCode = 415;
-            context.Response.Close();
-            return;
-        }
-
-        string destPath = Path.GetFullPath(Path.Combine(Plugin.SoundsFolder, fileName));
-        string soundsRoot = Path.GetFullPath(Plugin.SoundsFolder);
-        if (!destPath.StartsWith(soundsRoot, StringComparison.OrdinalIgnoreCase))
-        {
-            context.Response.StatusCode = 400;
-            context.Response.Close();
-            return;
-        }
-
-        try
-        {
-            using System.IO.Stream body = context.Request.InputStream;
-            byte[] data;
-            using (System.IO.MemoryStream ms = new())
-            {
-                body.CopyTo(ms);
-                data = ms.ToArray();
-            }
-            File.WriteAllBytes(destPath, data);
-            Plugin.Log.LogInfo($"[Upload] Received '{fileName}' from client.");
-        }
-        catch (Exception ex)
-        {
-            Plugin.Log.LogWarning($"[Upload] Failed to save '{fileName}': {ex.Message}");
-            context.Response.StatusCode = 500;
-            context.Response.Close();
-            return;
-        }
-
-        context.Response.StatusCode = 200;
-        context.Response.Close();
-        Plugin.Instance?.StartRefresh();
-    }
-
-    private static void ServeFileList(HttpListenerContext context)
-    {
-        long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
-        string[] oggFiles = Directory.GetFiles(Plugin.SoundsFolder, "*.ogg", SearchOption.TopDirectoryOnly);
-        string[] wavFiles = Directory.GetFiles(Plugin.SoundsFolder, "*.wav", SearchOption.TopDirectoryOnly);
-        System.Collections.Generic.List<string> lines = new();
-        foreach (string f in oggFiles)
-        {
-            long size = new FileInfo(f).Length;
-            if (size > maxBytes) continue;
-            lines.Add($"{Path.GetFileName(f)}|{size}");
-        }
-        foreach (string f in wavFiles)
-        {
-            long size = new FileInfo(f).Length;
-            if (size > maxBytes) continue;
-            lines.Add($"{Path.GetFileName(f)}|{size}");
-        }
-        string body = string.Join("\n", lines.ToArray());
-        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(body);
-        context.Response.ContentType = "text/plain";
-        context.Response.ContentLength64 = bytes.Length;
-        context.Response.OutputStream.Write(bytes, 0, bytes.Length);
-        context.Response.Close();
-    }
-
-    private static void ServeFile(HttpListenerContext context, string fileName, string requesterIp)
-    {
-        if (string.IsNullOrEmpty(fileName) || fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-        {
-            context.Response.StatusCode = 400;
-            context.Response.Close();
-            return;
-        }
-
-        string filePath = Path.GetFullPath(Path.Combine(Plugin.SoundsFolder, fileName));
-        string soundsRoot = Path.GetFullPath(Plugin.SoundsFolder);
-
-        if (!filePath.StartsWith(soundsRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(filePath))
-        {
-            context.Response.StatusCode = 404;
-            context.Response.Close();
-            return;
-        }
-
-        string ext = Path.GetExtension(filePath).ToLowerInvariant();
-
-        if (ext == ".json" && !fileName.Equals("selection.json", StringComparison.OrdinalIgnoreCase))
-        {
-            context.Response.StatusCode = 403;
-            context.Response.Close();
-            return;
-        }
-
-        long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
-        long fileSize = new FileInfo(filePath).Length;
-        if ((ext == ".ogg" || ext == ".wav") && fileSize > maxBytes)
-        {
-            context.Response.StatusCode = 413;
-            context.Response.Close();
-            return;
-        }
-
-        byte[] bytes = File.ReadAllBytes(filePath);
-        AcknowledgeDownloadedByClient(fileName, requesterIp);
-        if (ext == ".ogg" || ext == ".wav")
-            RecordClientDownload(fileName, requesterIp);
-        if (ext == ".json")
-            context.Response.ContentType = "application/json";
-        else if (ext == ".wav")
-            context.Response.ContentType = "audio/wav";
-        else
-            context.Response.ContentType = "audio/ogg";
-        context.Response.ContentLength64 = bytes.Length;
-        context.Response.OutputStream.Write(bytes, 0, bytes.Length);
-        context.Response.Close();
-    }
-
-    private static void RecordClientDownload(string fileName, string requesterIp)
-    {
-        if (string.IsNullOrWhiteSpace(requesterIp)) return;
-        string displayName;
-        int fileCount;
-        lock (_syncLock)
-        {
-            HashSet<string> clientFiles;
-            if (!_clientDownloadedFiles.TryGetValue(requesterIp, out clientFiles))
-            {
-                clientFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                _clientDownloadedFiles[requesterIp] = clientFiles;
-            }
-            clientFiles.Add(fileName);
-            fileCount = clientFiles.Count;
-            displayName = _clientDisplayNames.TryGetValue(requesterIp, out string n) && !string.IsNullOrWhiteSpace(n) ? n : requesterIp;
-        }
-        Plugin.Log.LogInfo($"[Sync] {displayName} downloaded '{fileName}' (now has {fileCount} file(s) from this host)");
-    }
-
-    private static void TrackClient(string requesterIp, string playerName)
-    {
-        if (string.IsNullOrWhiteSpace(requesterIp) || requesterIp == "127.0.0.1" || requesterIp == "::1")
-            return;
-        if (requesterIp == GetLocalIpAddress())
-            return;
-
-        lock (_syncLock)
-        {
-            _knownClients.Add(requesterIp);
-            if (!string.IsNullOrWhiteSpace(playerName))
-                _clientDisplayNames[requesterIp] = playerName;
-        }
-    }
-
-    private static void AcknowledgeDownloadedByClient(string fileName, string requesterIp)
-    {
-        if (string.IsNullOrWhiteSpace(requesterIp))
-            return;
-
-        lock (_syncLock)
-        {
-            HashSet<string> waiting;
-            if (_pendingImportedFileClients.TryGetValue(fileName, out waiting))
-                waiting.Remove(requesterIp);
-        }
-    }
-
-    private static string GetLocalIpAddress()
-    {
-        try
-        {
-            IPHostEntry host = Dns.GetHostEntry(Dns.GetHostName());
-            foreach (IPAddress address in host.AddressList)
-            {
-                if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                    return address.ToString();
-            }
-        }
-        catch (Exception) { }
-        return "127.0.0.1";
-    }
-
-    private static int ParseJsonInt(string json, string key, int fallback)
-    {
-        string search = "\"" + key + "\":";
-        int idx = json.IndexOf(search, StringComparison.Ordinal);
-        if (idx < 0) return fallback;
-        int start = idx + search.Length;
-        int end = start;
-        while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '-')) end++;
-        if (end == start) return fallback;
-        return int.TryParse(json.Substring(start, end - start), out int val) ? val : fallback;
     }
 }

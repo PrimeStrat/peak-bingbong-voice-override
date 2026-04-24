@@ -18,13 +18,12 @@ using UnityEngine.Networking;
 namespace BingBongVoiceOverride;
 
 [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
-public class Plugin : BaseUnityPlugin
+public partial class Plugin : BaseUnityPlugin
 {
     internal static Plugin Instance = null!;
     internal static ManualLogSource Log = null!;
     internal static ConfigEntry<bool> EnableMod = null!;
     internal static ConfigEntry<float> VolumeMultiplier = null!;
-    internal static ConfigEntry<KeyCode> RefreshKey = null!;
     internal static ConfigEntry<KeyCode> MenuToggleKey = null!;
     internal static ConfigEntry<bool> SessionLoadOnly = null!;
     internal static ConfigEntry<bool> ForceEnableRefresh = null!;
@@ -40,16 +39,16 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> UseNativeBingBongAPI = null!;
     internal static ConfigEntry<bool> UseNativeSubtitleWithCustomAudio = null!;
     internal static ConfigEntry<bool> AllowClientImports = null!;
-    internal static readonly List<AudioClip> CustomClips = new();
+    internal static readonly List<AudioClip> CustomClips = [];
     internal static readonly Dictionary<string, string> SubtitleOverrides =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        new(StringComparer.OrdinalIgnoreCase);
     internal static readonly Dictionary<string, List<TimedSubtitleLine>> TimedSubtitleOverrides =
-        new Dictionary<string, List<TimedSubtitleLine>>(StringComparer.OrdinalIgnoreCase);
+        new(StringComparer.OrdinalIgnoreCase);
     internal static readonly Dictionary<string, bool> EnabledClips =
-        new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        new(StringComparer.OrdinalIgnoreCase);
     internal static readonly HashSet<string> PendingSyncClipNames =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    internal static readonly List<AudioSource> ManagedSources = new List<AudioSource>();
+        new(StringComparer.OrdinalIgnoreCase);
+    internal static readonly List<AudioSource> ManagedSources = [];
 
     // When set, the next override pick uses this clip name once instead of random selection.
     internal static string ForcedNextClipName = string.Empty;
@@ -114,6 +113,9 @@ public class Plugin : BaseUnityPlugin
     // True when the importer menu window is visible.
     internal static bool MenuVisible = false;
 
+    // True while a sound refresh or network sync operation is in progress.
+    internal static bool IsRefreshPending => Instance?._refreshPending ?? false;
+
     // Importer status text displayed in the menu window.
     internal static string ImportStatus = "idle";
 
@@ -177,8 +179,6 @@ public class Plugin : BaseUnityPlugin
             "When true, custom clip subtitles are also pushed into PEAK's native subtitle table. When false, native subtitle text is suppressed for custom audio.");
         AllowClientImports = Config.Bind("Network", "AllowClientImports", false,
             "When true, any connected client can upload new sound files through the mod's HTTP sync server.");
-        RefreshKey = Config.Bind("Menu", "RefreshKey", KeyCode.F5,
-            "While holding Bing Bong (or ForceEnableRefresh = true), press this key to reload custom sounds.");
         MenuToggleKey = Config.Bind("Menu", "MenuToggleKey", KeyCode.F6,
             "Toggle the unified mod menu on/off.");
         ForceEnableRefresh = Config.Bind("Menu", "ForceEnableRefresh", true,
@@ -216,7 +216,7 @@ public class Plugin : BaseUnityPlugin
         Log.LogInfo($"Sounds folder: {SoundsFolder}");
     }
 
-    // Polls for the refresh key and triggers a reload when the player is holding Bing Bong or ForceEnableRefresh is set. returns: void
+    // Handles per-frame plugin logic for subtitle ticks and game-state tracking. returns: void
     private void Update()
     {
         if (!EnableMod.Value || _refreshPending) return;
@@ -227,10 +227,6 @@ public class Plugin : BaseUnityPlugin
             TickNativeTimedSubtitle();
         SubtitleTextOverridePatches.TickForceActiveSubtitle();
         TickMirrorOnDrop();
-
-        bool canRefresh = IsHoldingBingBong || ForceEnableRefresh.Value;
-        if (canRefresh && Input.GetKeyDown(RefreshKey.Value))
-            StartRefresh();
     }
 
     // Unpatches Harmony and stops the sound sync server when the plugin unloads. returns: void
@@ -370,10 +366,11 @@ public class Plugin : BaseUnityPlugin
     {
         if (_refreshPending) return;
         _refreshPending = true;
+        BingBongNetworkSync.AllowResync();
         StartCoroutine(RefreshSoundsCoroutine());
     }
 
-    // Clears and reloads all custom clips then clears the pending refresh flag. returns: IEnumerator
+    // Clears and reloads all custom clips, waits for network sync to complete, then releases the pending flag. returns: IEnumerator
     private IEnumerator RefreshSoundsCoroutine()
     {
         ClipsReady = false;
@@ -387,8 +384,32 @@ public class Plugin : BaseUnityPlugin
         ActiveTimedSubtitleClip = null;
         ActiveTimedSubtitleStart = 0f;
         ActiveTimedSubtitleLastTick = 0f;
+
+        // If a client, wait for the host download to finish before loading clips so newly synced files are included.
+        if (BingBongNetworkSync.IsConnectedAsClient)
+        {
+            float elapsed = 0f;
+            while (BingBongNetworkSync.IsSyncBusy && elapsed < 60f)
+            {
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+        }
+
         Log.LogInfo("Refreshing sounds...");
         yield return StartCoroutine(LoadCustomClips());
+
+        // If hosting with players in the lobby, wait up to 30 s for all clients to confirm they have the latest files.
+        if (BingBongNetworkSync.IsHosting)
+        {
+            float elapsed = 0f;
+            while (BingBongNetworkSync.IsSyncBusy && elapsed < 30f)
+            {
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+        }
+
         _refreshPending = false;
     }
 
@@ -537,7 +558,7 @@ public class Plugin : BaseUnityPlugin
     // returns: List<AudioClip>
     internal static List<AudioClip> GetActiveClips()
     {
-        List<AudioClip> active = new List<AudioClip>();
+        List<AudioClip> active = [];
         for (int i = 0; i < CustomClips.Count; i++)
         {
             AudioClip clip = CustomClips[i];
@@ -556,7 +577,7 @@ public class Plugin : BaseUnityPlugin
         try
         {
             string path = Path.Combine(SoundsFolder, "selection.json");
-            StringBuilder sb = new StringBuilder();
+            StringBuilder sb = new();
             sb.Append('{');
             bool first = true;
             foreach (KeyValuePair<string, bool> kv in EnabledClips)
@@ -586,7 +607,7 @@ public class Plugin : BaseUnityPlugin
         try
         {
             string raw = File.ReadAllText(path);
-            MatchCollection matches = Regex.Matches(raw, "\"(?<k>(?:\\\\.|[^\"])+)\"\\s*:\\s*(?<v>true|false)");
+            MatchCollection matches = MyRegex().Matches(raw);
             foreach (Match m in matches)
             {
                 string key = Regex.Unescape(m.Groups["k"].Value);
@@ -739,6 +760,20 @@ public class Plugin : BaseUnityPlugin
         BingBongNetworkSync.BroadcastStop();
     }
 
+    // Pauses the plugin AudioSource without resetting playback position. returns: void
+    internal static void PausePlayback()
+    {
+        if (PluginAudioSource != null && PluginAudioSource.isPlaying)
+            PluginAudioSource.Pause();
+    }
+
+    // Resumes a paused plugin AudioSource from its saved position. returns: void
+    internal static void UnpausePlayback()
+    {
+        if (PluginAudioSource != null && !PluginAudioSource.isPlaying && PluginAudioSource.clip != null)
+            PluginAudioSource.UnPause();
+    }
+
     // Clears all active timed and single subtitle state. Safe to call from any context. returns: void
     internal static void ClearTimedSubtitles()
     {
@@ -808,7 +843,7 @@ public class Plugin : BaseUnityPlugin
     private IEnumerator LoadCustomClips()
     {
         string[] extensions = ["*.wav", "*.ogg"];
-        List<string> files = new List<string>();
+        List<string> files = [];
         foreach (string ext in extensions)
             files.AddRange(Directory.GetFiles(SoundsFolder, ext, SearchOption.TopDirectoryOnly));
 
@@ -915,7 +950,7 @@ public class Plugin : BaseUnityPlugin
         string readmePath = Path.Combine(SoundsFolder, "README.txt");
         if (!File.Exists(readmePath))
         {
-            StringBuilder sb = new StringBuilder();
+            StringBuilder sb = new();
             sb.AppendLine("BingBong Voice Override - Sounds Folder");
             sb.AppendLine();
             sb.AppendLine("1) Put .ogg or .wav files in this folder.");
@@ -1026,7 +1061,7 @@ public class Plugin : BaseUnityPlugin
         string timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
         string outTemplate = Path.Combine(SoundsFolder, $"yt_{timestamp}.%(ext)s");
 
-        ProcessStartInfo psi = new ProcessStartInfo
+        ProcessStartInfo psi = new()
         {
             FileName = ytDlp,
             Arguments = $"-x --no-playlist -N 4 --audio-format vorbis --audio-quality 8"
@@ -1193,7 +1228,7 @@ public class Plugin : BaseUnityPlugin
     private IEnumerator RunSubtitleImportPass(string ytDlp, string url, string outputTemplate, bool autoSubs, Action<bool, string> onDone)
     {
         string passFlag = autoSubs ? "--write-auto-subs" : "--write-subs";
-        ProcessStartInfo psi = new ProcessStartInfo
+        ProcessStartInfo psi = new()
         {
             FileName = ytDlp,
             Arguments = "--skip-download"
@@ -1257,11 +1292,13 @@ public class Plugin : BaseUnityPlugin
                 yield return StartCoroutine(BingBongNetworkSync.UploadFileToHost(jsonName, BingBongNetworkSync.ActiveHostAddress));
         }
 
-        while (!BingBongNetworkSync.IsImportedFileSynced(fileName))
+        float syncElapsed = 0f;
+        while (!BingBongNetworkSync.IsImportedFileSynced(fileName) && syncElapsed < 60f)
         {
             int remaining = BingBongNetworkSync.GetPendingClientCount(fileName);
             ImportStatus = $"syncing to clients... {remaining} remaining";
             yield return new WaitForSecondsRealtime(0.25f);
+            syncElapsed += 0.25f;
         }
 
         PendingSyncClipNames.Remove(clipName);
@@ -1455,6 +1492,14 @@ public class Plugin : BaseUnityPlugin
     // returns: string
     internal static string GetLocalPlayerName()
     {
+        // Prefer the Photon NickName since that is what _lobbyPlayerNames tracks on the host.
+        try
+        {
+            string photonName = Patches.NetworkSyncPatches.GetLocalPhotonNickName();
+            if (!string.IsNullOrWhiteSpace(photonName))
+                return photonName;
+        }
+        catch (Exception) { }
         try
         {
             string[] steamAssemblies = ["com.rlabrecque.steamworks.net", "Steamworks.NET", "Assembly-CSharp"];
@@ -1494,7 +1539,7 @@ public class Plugin : BaseUnityPlugin
         {
             try
             {
-                ProcessStartInfo probe = new ProcessStartInfo
+                ProcessStartInfo probe = new()
                 {
                     FileName = candidate,
                     Arguments = "--version",
@@ -1610,7 +1655,7 @@ public class Plugin : BaseUnityPlugin
     // returns: List<TimedSubtitleLine>
     private List<TimedSubtitleLine> TryReadTimedSubtitleOverrides(string audioPath)
     {
-        List<TimedSubtitleLine> lines = new List<TimedSubtitleLine>();
+        List<TimedSubtitleLine> lines = [];
         string jsonPath = Path.ChangeExtension(audioPath, ".json");
         if (!File.Exists(jsonPath)) return lines;
 
@@ -1691,7 +1736,7 @@ public class Plugin : BaseUnityPlugin
 
         string first = best[0].Text;
         string escapedFirst = EscapeJson(first);
-        StringBuilder sb = new StringBuilder();
+        StringBuilder sb = new();
         sb.Append("{\n");
         sb.Append("  \"subtitle\": \"").Append(escapedFirst).Append("\",\n");
         sb.Append("  \"timedSubtitles\": [\n");
@@ -1718,7 +1763,7 @@ public class Plugin : BaseUnityPlugin
     // returns: List<TimedSubtitleLine>
     private List<TimedSubtitleLine> ParseVttTimedSubtitles(string vttPath)
     {
-        List<TimedSubtitleLine> lines = new List<TimedSubtitleLine>();
+        List<TimedSubtitleLine> lines = [];
         string[] rawLines = File.ReadAllLines(vttPath);
         int i = 0;
         while (i < rawLines.Length)
@@ -1741,7 +1786,7 @@ public class Plugin : BaseUnityPlugin
             float end = ParseVttTime(parts[1]);
             i++;
 
-            StringBuilder text = new StringBuilder();
+            StringBuilder text = new();
             while (i < rawLines.Length && !string.IsNullOrWhiteSpace(rawLines[i]))
             {
                 string t = Regex.Replace(rawLines[i], "<.*?>", string.Empty).Trim();
@@ -1771,7 +1816,7 @@ public class Plugin : BaseUnityPlugin
         try
         {
             string head = string.Empty;
-            using (StreamReader r = new StreamReader(vttPath))
+            using (StreamReader r = new(vttPath))
             {
                 char[] buf = new char[1024];
                 int n = r.Read(buf, 0, buf.Length);
@@ -1796,9 +1841,9 @@ public class Plugin : BaseUnityPlugin
     private static List<TimedSubtitleLine> DedupeRollingCues(List<TimedSubtitleLine> lines)
     {
         if (lines == null || lines.Count == 0)
-            return lines ?? new List<TimedSubtitleLine>();
+            return lines ?? [];
 
-        List<TimedSubtitleLine> result = new List<TimedSubtitleLine>();
+        List<TimedSubtitleLine> result = [];
         for (int i = 0; i < lines.Count; i++)
         {
             TimedSubtitleLine current = lines[i];
@@ -1949,4 +1994,7 @@ public class Plugin : BaseUnityPlugin
 
         return string.Empty;
     }
+
+    private static Regex MyRegex() =>
+        new Regex("\"(?<k>(?:\\\\.|[^\"])+)\"\\s*:\\s*(?<v>true|false)");
 }
