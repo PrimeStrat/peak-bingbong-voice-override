@@ -22,6 +22,10 @@ internal static class BingBongNetworkSync
 
     private const byte SIG_REFRESH = 1;
     private const byte SIG_STOP = 2;
+    private const byte SIG_PLAY = 3;
+    private const byte SIG_PAUSE = 4;
+    private const byte SIG_RESUME = 5;
+    private const byte SIG_FORCE_NEXT = 6;
 
     private const int CHUNK_SIZE = 64 * 1024;
 
@@ -130,6 +134,46 @@ internal static class BingBongNetworkSync
     {
         if (!_running) return;
         Patches.PhotonNet.SendToOthers(EV_SIGNAL, new byte[] { SIG_STOP });
+    }
+
+    // Broadcasts a play command for a specific clip to all other players.
+    // clipName (string): clip name without extension
+    // returns: void
+    internal static void BroadcastPlay(string clipName)
+    {
+        if (!_running) return;
+        byte[] nameBytes = Encoding.UTF8.GetBytes(clipName ?? string.Empty);
+        byte[] payload = new byte[1 + nameBytes.Length];
+        payload[0] = SIG_PLAY;
+        Buffer.BlockCopy(nameBytes, 0, payload, 1, nameBytes.Length);
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, payload);
+    }
+
+    // Broadcasts a pause command to all other players. returns: void
+    internal static void BroadcastPause()
+    {
+        if (!_running) return;
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, new byte[] { SIG_PAUSE });
+    }
+
+    // Broadcasts a resume command to all other players. returns: void
+    internal static void BroadcastResume()
+    {
+        if (!_running) return;
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, new byte[] { SIG_RESUME });
+    }
+
+    // Broadcasts a force-next clip command to all other players.
+    // clipName (string): clip name without extension to set as the forced next pick
+    // returns: void
+    internal static void BroadcastForceNext(string clipName)
+    {
+        if (!_running) return;
+        byte[] nameBytes = Encoding.UTF8.GetBytes(clipName ?? string.Empty);
+        byte[] payload = new byte[1 + nameBytes.Length];
+        payload[0] = SIG_FORCE_NEXT;
+        Buffer.BlockCopy(nameBytes, 0, payload, 1, nameBytes.Length);
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, payload);
     }
 
     // Tells every connected client to re-pull files and refresh.
@@ -313,7 +357,8 @@ internal static class BingBongNetworkSync
         try
         {
             return Directory.GetFiles(Plugin.SoundsFolder, "*.ogg", SearchOption.TopDirectoryOnly).Length
-                 + Directory.GetFiles(Plugin.SoundsFolder, "*.wav", SearchOption.TopDirectoryOnly).Length;
+                 + Directory.GetFiles(Plugin.SoundsFolder, "*.wav", SearchOption.TopDirectoryOnly).Length
+                 + Directory.GetFiles(Plugin.SoundsFolder, "*.json", SearchOption.TopDirectoryOnly).Length;
         }
         catch (Exception) { return 0; }
     }
@@ -441,7 +486,7 @@ internal static class BingBongNetworkSync
         foreach ((string name, long _) in _hostFileList)
         {
             string ext = Path.GetExtension(name).ToLowerInvariant();
-            if ((ext == ".ogg" || ext == ".wav") && File.Exists(Path.Combine(Plugin.SoundsFolder, name)))
+            if ((ext == ".ogg" || ext == ".wav" || ext == ".json") && File.Exists(Path.Combine(Plugin.SoundsFolder, name)))
                 presentFiles.Add(name);
         }
         if (presentFiles.Count > 0)
@@ -506,6 +551,11 @@ internal static class BingBongNetworkSync
             {
                 long size = new FileInfo(f).Length;
                 if (size > maxBytes) continue;
+                entries.Add($"{Path.GetFileName(f)}|{size}");
+            }
+            foreach (string f in Directory.GetFiles(Plugin.SoundsFolder, "*.json", SearchOption.TopDirectoryOnly))
+            {
+                long size = new FileInfo(f).Length;
                 entries.Add($"{Path.GetFileName(f)}|{size}");
             }
         }
@@ -647,6 +697,21 @@ internal static class BingBongNetworkSync
                 break;
             case SIG_STOP:
                 Plugin.ClearTimedSubtitles();
+                Plugin.ApplyRemoteStop();
+                break;
+            case SIG_PLAY:
+                string playName = bytes.Length > 1 ? Encoding.UTF8.GetString(bytes, 1, bytes.Length - 1) : string.Empty;
+                Plugin.ApplyRemotePlay(playName);
+                break;
+            case SIG_PAUSE:
+                Plugin.ApplyRemotePause();
+                break;
+            case SIG_RESUME:
+                Plugin.ApplyRemoteResume();
+                break;
+            case SIG_FORCE_NEXT:
+                string forceName = bytes.Length > 1 ? Encoding.UTF8.GetString(bytes, 1, bytes.Length - 1) : string.Empty;
+                Plugin.ApplyRemoteForceNext(forceName);
                 break;
         }
     }

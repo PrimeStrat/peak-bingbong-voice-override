@@ -271,7 +271,10 @@ internal class UnifiedMenu : MonoBehaviour
             if (GUILayout.Button("Play", GUILayout.Width(60f)))
                 Plugin.PlayThroughPluginSource(clip);
             if (GUILayout.Button("Force Next", GUILayout.Width(90f)))
+            {
                 Plugin.ForcedNextClipName = clip.name;
+                BingBongNetworkSync.BroadcastForceNext(clip.name);
+            }
 
             GUILayout.EndHorizontal();
 

@@ -53,6 +53,10 @@ public partial class Plugin : BaseUnityPlugin
     // When set, the next override pick uses this clip name once instead of random selection.
     internal static string ForcedNextClipName = string.Empty;
 
+    // Suppresses outgoing playback broadcasts for the duration of a remote-triggered action
+    // to prevent re-broadcast loops when applying a received signal.
+    internal static bool SuppressPlaybackBroadcast = false;
+
     // AudioSource owned by the plugin GameObject, used for music mode and auto-play.
     internal static AudioSource PluginAudioSource = null!;
 
@@ -643,6 +647,8 @@ public partial class Plugin : BaseUnityPlugin
         PluginAudioSource.clip = clip;
         PluginAudioSource.Play();
         OnClipPlayed(clip);
+        if (!SuppressPlaybackBroadcast)
+            BingBongNetworkSync.BroadcastPlay(clip.name);
     }
 
     // Plays a clip through the plugin's own AudioSource at the position of the given source.
@@ -757,21 +763,30 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         ClearTimedSubtitles();
-        BingBongNetworkSync.BroadcastStop();
+        if (!SuppressPlaybackBroadcast)
+            BingBongNetworkSync.BroadcastStop();
     }
 
     // Pauses the plugin AudioSource without resetting playback position. returns: void
     internal static void PausePlayback()
     {
         if (PluginAudioSource != null && PluginAudioSource.isPlaying)
+        {
             PluginAudioSource.Pause();
+            if (!SuppressPlaybackBroadcast)
+                BingBongNetworkSync.BroadcastPause();
+        }
     }
 
     // Resumes a paused plugin AudioSource from its saved position. returns: void
     internal static void UnpausePlayback()
     {
         if (PluginAudioSource != null && !PluginAudioSource.isPlaying && PluginAudioSource.clip != null)
+        {
             PluginAudioSource.UnPause();
+            if (!SuppressPlaybackBroadcast)
+                BingBongNetworkSync.BroadcastResume();
+        }
     }
 
     // Clears all active timed and single subtitle state. Safe to call from any context. returns: void
@@ -784,6 +799,51 @@ public partial class Plugin : BaseUnityPlugin
         ActiveTimedSubtitleStart = 0f;
         ActiveTimedSubtitleLastTick = 0f;
         ActiveNativeSubtitle = string.Empty;
+    }
+
+    // Applies a remote play command received via Photon signal without re-broadcasting.
+    // clipName (string): name of the clip to look up and play
+    // returns: void
+    internal static void ApplyRemotePlay(string clipName)
+    {
+        if (string.IsNullOrEmpty(clipName) || !ClipsReady) return;
+        AudioClip? clip = CustomClips.Find(c => c.name.Equals(clipName, StringComparison.OrdinalIgnoreCase));
+        if (clip == null) return;
+        SuppressPlaybackBroadcast = true;
+        try { PlayThroughPluginSource(clip); }
+        finally { SuppressPlaybackBroadcast = false; }
+    }
+
+    // Applies a remote pause command received via Photon signal without re-broadcasting. returns: void
+    internal static void ApplyRemotePause()
+    {
+        SuppressPlaybackBroadcast = true;
+        try { PausePlayback(); }
+        finally { SuppressPlaybackBroadcast = false; }
+    }
+
+    // Applies a remote resume command received via Photon signal without re-broadcasting. returns: void
+    internal static void ApplyRemoteResume()
+    {
+        SuppressPlaybackBroadcast = true;
+        try { UnpausePlayback(); }
+        finally { SuppressPlaybackBroadcast = false; }
+    }
+
+    // Applies a remote stop command received via Photon signal without re-broadcasting. returns: void
+    internal static void ApplyRemoteStop()
+    {
+        SuppressPlaybackBroadcast = true;
+        try { StopAllManagedAudio(); }
+        finally { SuppressPlaybackBroadcast = false; }
+    }
+
+    // Applies a remote force-next command received via Photon signal.
+    // clipName (string): clip name to set as the forced next pick
+    // returns: void
+    internal static void ApplyRemoteForceNext(string clipName)
+    {
+        ForcedNextClipName = clipName ?? string.Empty;
     }
 
     // Coroutine that periodically plays a random enabled clip when AutoPlay is on and MusicMode is off.
@@ -1282,6 +1342,9 @@ public partial class Plugin : BaseUnityPlugin
         string clipName = Path.GetFileNameWithoutExtension(fileName);
         PendingSyncClipNames.Add(clipName);
         BingBongNetworkSync.RegisterImportedFile(fileName);
+        // Notify clients immediately so the wait loop below has something to wait on.
+        // Without this, clients are never signaled until after the 60s timeout fires.
+        BingBongNetworkSync.AllowResync();
 
         if (!BingBongNetworkSync.IsHosting && !string.IsNullOrEmpty(BingBongNetworkSync.ActiveHostAddress)
             && AllowClientImports.Value)
