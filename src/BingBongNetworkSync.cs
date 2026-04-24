@@ -26,6 +26,9 @@ internal static class BingBongNetworkSync
     private const byte SIG_PAUSE = 4;
     private const byte SIG_RESUME = 5;
     private const byte SIG_FORCE_NEXT = 6;
+    private const byte SIG_SUBTITLE = 7;
+    private const byte SIG_CLIP_ENABLED = 8;
+    private const byte SIG_PERMISSIONS = 9;
 
     private const int CHUNK_SIZE = 64 * 1024;
 
@@ -60,6 +63,10 @@ internal static class BingBongNetworkSync
     private static bool _clientSyncRunning = false;
     private static bool _syncFailed = false;
     private static bool _hasReachedHost = false;
+    internal static bool ClientAllowPlayback = false;
+    internal static bool ClientAllowSubtitleEdit = false;
+    internal static bool ClientAllowSelectionEdit = false;
+    internal static bool ClientAllowSettingsChange = false;
 
     private static readonly object _syncLock = new();
 
@@ -176,6 +183,51 @@ internal static class BingBongNetworkSync
         Patches.PhotonNet.SendToOthers(EV_SIGNAL, payload);
     }
 
+    // Broadcasts a subtitle override change to all other players. Usable by host or a permitted client.
+    // clipName (string): clip name without extension
+    // subtitle (string): new subtitle text, empty to clear
+    // returns: void
+    internal static void BroadcastSubtitleUpdate(string clipName, string subtitle)
+    {
+        if (!Patches.PhotonNet.IsAvailable) return;
+        byte[] nameBytes = Encoding.UTF8.GetBytes(clipName ?? string.Empty);
+        byte[] subtitleBytes = Encoding.UTF8.GetBytes(subtitle ?? string.Empty);
+        byte[] payload = new byte[1 + nameBytes.Length + 1 + subtitleBytes.Length];
+        payload[0] = SIG_SUBTITLE;
+        Buffer.BlockCopy(nameBytes, 0, payload, 1, nameBytes.Length);
+        payload[1 + nameBytes.Length] = 0;
+        Buffer.BlockCopy(subtitleBytes, 0, payload, 1 + nameBytes.Length + 1, subtitleBytes.Length);
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, payload);
+    }
+
+    // Broadcasts a clip enabled/disabled state change to all other players. Usable by host or a permitted client.
+    // clipName (string): clip name without extension
+    // enabled (bool): new enabled state
+    // returns: void
+    internal static void BroadcastClipEnabled(string clipName, bool enabled)
+    {
+        if (!Patches.PhotonNet.IsAvailable) return;
+        byte[] nameBytes = Encoding.UTF8.GetBytes(clipName ?? string.Empty);
+        byte[] payload = new byte[2 + nameBytes.Length];
+        payload[0] = SIG_CLIP_ENABLED;
+        payload[1] = enabled ? (byte)1 : (byte)0;
+        Buffer.BlockCopy(nameBytes, 0, payload, 2, nameBytes.Length);
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, payload);
+    }
+
+    // Broadcasts the current host permission flags to all connected players. Host only.
+    // returns: void
+    internal static void BroadcastPermissions()
+    {
+        if (!_running) return;
+        byte perms = 0;
+        if (Plugin.AllowClientPlayback.Value) perms |= 1;
+        if (Plugin.AllowClientSubtitleEdit.Value) perms |= 2;
+        if (Plugin.AllowClientSelectionEdit.Value) perms |= 4;
+        if (Plugin.AllowClientSettingsChange.Value) perms |= 8;
+        Patches.PhotonNet.SendToOthers(EV_SIGNAL, new byte[] { SIG_PERMISSIONS, perms });
+    }
+
     // Tells every connected client to re-pull files and refresh.
     // returns: void
     internal static void BroadcastRefresh()
@@ -227,6 +279,7 @@ internal static class BingBongNetworkSync
         lock (_syncLock)
             _lobbyPlayerNames.Add(playerName);
         Plugin.Log.LogInfo($"[Sync] Lobby player joined: '{playerName}'");
+        BroadcastPermissions();
     }
 
     // Removes a player from the lobby tracking list. Called from NetworkSyncPatches on Photon player-leave.
@@ -693,6 +746,7 @@ internal static class BingBongNetworkSync
         {
             case SIG_REFRESH:
                 _syncFailed = false;
+                _clientSyncRunning = false;
                 TriggerClientSync();
                 break;
             case SIG_STOP:
@@ -712,6 +766,41 @@ internal static class BingBongNetworkSync
             case SIG_FORCE_NEXT:
                 string forceName = bytes.Length > 1 ? Encoding.UTF8.GetString(bytes, 1, bytes.Length - 1) : string.Empty;
                 Plugin.ApplyRemoteForceNext(forceName);
+                break;
+            case SIG_SUBTITLE:
+                if (bytes.Length >= 2)
+                {
+                    int sep = Array.IndexOf(bytes, (byte)0, 1);
+                    string clipName = sep > 1 ? Encoding.UTF8.GetString(bytes, 1, sep - 1) : string.Empty;
+                    string subtitle = sep >= 1 && sep < bytes.Length - 1
+                        ? Encoding.UTF8.GetString(bytes, sep + 1, bytes.Length - sep - 1)
+                        : string.Empty;
+                    if (!string.IsNullOrEmpty(clipName))
+                        Plugin.SaveSubtitleOverrideForClip(clipName, subtitle);
+                }
+                break;
+            case SIG_CLIP_ENABLED:
+                if (bytes.Length >= 3)
+                {
+                    bool enabled = bytes[1] != 0;
+                    string enabledClipName = Encoding.UTF8.GetString(bytes, 2, bytes.Length - 2);
+                    if (!string.IsNullOrEmpty(enabledClipName))
+                    {
+                        Plugin.EnabledClips[enabledClipName] = enabled;
+                        Plugin.SaveSelection();
+                    }
+                }
+                break;
+            case SIG_PERMISSIONS:
+                if (bytes.Length >= 2)
+                {
+                    byte perms = bytes[1];
+                    ClientAllowPlayback = (perms & 1) != 0;
+                    ClientAllowSubtitleEdit = (perms & 2) != 0;
+                    ClientAllowSelectionEdit = (perms & 4) != 0;
+                    ClientAllowSettingsChange = (perms & 8) != 0;
+                    Plugin.Log.LogInfo($"[Sync] Host permissions: playback={ClientAllowPlayback} subtitleEdit={ClientAllowSubtitleEdit} selectionEdit={ClientAllowSelectionEdit} settingsChange={ClientAllowSettingsChange}");
+                }
                 break;
         }
     }

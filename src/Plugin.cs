@@ -39,6 +39,10 @@ public partial class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> UseNativeBingBongAPI = null!;
     internal static ConfigEntry<bool> UseNativeSubtitleWithCustomAudio = null!;
     internal static ConfigEntry<bool> AllowClientImports = null!;
+    internal static ConfigEntry<bool> AllowClientPlayback = null!;
+    internal static ConfigEntry<bool> AllowClientSubtitleEdit = null!;
+    internal static ConfigEntry<bool> AllowClientSelectionEdit = null!;
+    internal static ConfigEntry<bool> AllowClientSettingsChange = null!;
     internal static readonly List<AudioClip> CustomClips = [];
     internal static readonly Dictionary<string, string> SubtitleOverrides =
         new(StringComparer.OrdinalIgnoreCase);
@@ -183,6 +187,19 @@ public partial class Plugin : BaseUnityPlugin
             "When true, custom clip subtitles are also pushed into PEAK's native subtitle table. When false, native subtitle text is suppressed for custom audio.");
         AllowClientImports = Config.Bind("Network", "AllowClientImports", false,
             "When true, any connected client can upload new sound files through the mod's HTTP sync server.");
+        AllowClientPlayback = Config.Bind("Network", "AllowClientPlayback", true,
+            "When true, non-host players can use playback controls (play/pause/stop/force-next) from their menu.");
+        AllowClientSubtitleEdit = Config.Bind("Network", "AllowClientSubtitleEdit", false,
+            "When true, non-host players can save subtitle overrides that sync to all players.");
+        AllowClientSelectionEdit = Config.Bind("Network", "AllowClientSelectionEdit", false,
+            "When true, non-host players can toggle clip enabled states that sync to all players.");
+        AllowClientSettingsChange = Config.Bind("Network", "AllowClientSettingsChange", false,
+            "When true, non-host players can change playback settings (volume, autoplay, etc.) via the menu.");
+
+        AllowClientPlayback.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
+        AllowClientSubtitleEdit.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
+        AllowClientSelectionEdit.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
+        AllowClientSettingsChange.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
         MenuToggleKey = Config.Bind("Menu", "MenuToggleKey", KeyCode.F6,
             "Toggle the unified mod menu on/off.");
         ForceEnableRefresh = Config.Bind("Menu", "ForceEnableRefresh", true,
@@ -1114,7 +1131,13 @@ public partial class Plugin : BaseUnityPlugin
         string ytDlp = FindYtDlp();
         if (string.IsNullOrEmpty(ytDlp))
         {
-            ImportStatus = "error: yt-dlp not found. Install from https://github.com/yt-dlp/yt-dlp and add to PATH";
+            ImportStatus = "yt-dlp not found -- downloading automatically...";
+            yield return StartCoroutine(TryAutoDownloadYtDlpCoroutine());
+            ytDlp = FindYtDlp();
+        }
+        if (string.IsNullOrEmpty(ytDlp))
+        {
+            ImportStatus = "error: yt-dlp could not be found or downloaded. Get it from https://github.com/yt-dlp/yt-dlp";
             yield break;
         }
 
@@ -1580,6 +1603,33 @@ public partial class Plugin : BaseUnityPlugin
         }
         catch (Exception) { }
         return Environment.UserName;
+    }
+
+    // Downloads yt-dlp.exe from the official GitHub release into the plugin folder.
+    // returns: IEnumerator
+    private IEnumerator TryAutoDownloadYtDlpCoroutine()
+    {
+        string pluginDir = Path.GetDirectoryName(typeof(Plugin).Assembly.Location) ?? string.Empty;
+        string destPath = Path.Combine(pluginDir, "yt-dlp.exe");
+        const string downloadUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+        ImportStatus = "Downloading yt-dlp.exe...";
+        using UnityWebRequest req = new UnityWebRequest(downloadUrl, UnityWebRequest.kHttpVerbGET);
+        req.downloadHandler = new DownloadHandlerBuffer();
+        yield return req.SendWebRequest();
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            Log.LogWarning($"[YtDlp] Auto-download failed: {req.error}");
+            yield break;
+        }
+        try
+        {
+            File.WriteAllBytes(destPath, req.downloadHandler.data);
+            Log.LogInfo($"[YtDlp] Downloaded to {destPath}");
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning($"[YtDlp] Could not write yt-dlp.exe: {ex.Message}");
+        }
     }
 
     // Finds the yt-dlp executable by checking PATH, the plugin folder, and common install locations.
