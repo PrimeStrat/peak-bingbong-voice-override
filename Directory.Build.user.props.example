@@ -1,0 +1,14 @@
+<!--
+  Local overrides. Copy to Directory.Build.user.props (gitignored if you wish) and set values for your machine.
+  Example:
+    <Project>
+      <PropertyGroup>
+        <GameDir>C:\Program Files (x86)\Steam\steamapps\common\YourGame</GameDir>
+      </PropertyGroup>
+    </Project>
+-->
+<Project>
+  <PropertyGroup>
+    <!-- <GameDir>C:\Program Files (x86)\Steam\steamapps\common\PEAK</GameDir> -->
+  </PropertyGroup>
+</Project>

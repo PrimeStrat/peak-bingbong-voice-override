@@ -1,0 +1,30 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+build/
+dist/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# NuGet
+*.nupkg
+packages/
+.nuget/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local secrets (Thunderstore API token, etc.)
+.env
+.env.local
+secrets.*
+tcli-config.local.toml

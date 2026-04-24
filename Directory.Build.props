@@ -1,0 +1,30 @@
+<Project>
+  <PropertyGroup>
+    <!-- Edit these to rebrand the template -->
+    <ModName>BingBongVoiceOverride</ModName>
+    <ModAuthor>PrimeStrat</ModAuthor>
+    <ModContributors>Ariannasv22</ModContributors>
+    <ModVersion>1.0.0</ModVersion>
+    <ModGuid>com.$(ModAuthor).$(ModName)</ModGuid>
+    <ModDescription>Drop custom audio files into the sounds folder and automatically override Bing Bong's SFX in PEAK.</ModDescription>
+
+    <!-- Path to the game install (override locally via Directory.Build.user.props or env var GAME_DIR) -->
+    <GameDir Condition="'$(GameDir)' == '' AND '$(GAME_DIR)' != ''">$(GAME_DIR)</GameDir>
+    <GameName Condition="'$(GameName)' == ''">PEAK</GameName>
+    <GameManagedDir Condition="'$(GameDir)' != ''">$(GameDir)\$(GameName)_Data\Managed</GameManagedDir>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+
+    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
+    <ArtifactsDir>$(RepoRoot)build\</ArtifactsDir>
+    <DistDir>$(RepoRoot)dist\</DistDir>
+    <ThunderstoreDir>$(RepoRoot)thunderstore\</ThunderstoreDir>
+  </PropertyGroup>
+
+  <Import Project="$(RepoRoot)Directory.Build.user.props" Condition="Exists('$(RepoRoot)Directory.Build.user.props')" />
+</Project>

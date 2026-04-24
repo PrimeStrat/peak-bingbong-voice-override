@@ -1,0 +1,89 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>$(ModName)</AssemblyName>
+    <RootNamespace>$(ModName)</RootNamespace>
+    <Version>$(ModVersion)</Version>
+    <Description>$(ModDescription)</Description>
+    <Authors>$(ModAuthor)</Authors>
+    <Product>$(ModName)</Product>
+    <OutputPath>$(ArtifactsDir)bin\</OutputPath>
+    <RestoreAdditionalProjectSources>https://nuget.bepinex.dev/v3/index.json</RestoreAdditionalProjectSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Core" Version="5.4.21" />
+    <PackageReference Include="BepInEx.PluginInfoProps" Version="2.1.0" />
+    <PackageReference Include="UnityEngine.Modules" Version="2021.3.0" IncludeAssets="compile" />
+    <PackageReference Include="HarmonyX" Version="2.10.2" />
+  </ItemGroup>
+  <!--
+    Reference game-specific assemblies (Assembly-CSharp.dll etc.) by setting GameDir in
+    Directory.Build.user.props. Add <Reference Include="Assembly-CSharp" /> entries here as needed.
+  -->
+  <ItemGroup Condition="'$(GameManagedDir)' != '' AND Exists('$(GameManagedDir)')">
+    <Reference Include="Assembly-CSharp" Condition="Exists('$(GameManagedDir)\Assembly-CSharp.dll')">
+      <HintPath>$(GameManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!--
+    After build, stage the plugin DLL alongside Thunderstore packaging assets in build/package/
+    so it can be zipped into a Thunderstore-ready archive by the Pack target.
+  -->
+  <Target Name="StagePackage" AfterTargets="Build">
+    <PropertyGroup>
+      <PackageStageDir>$(ArtifactsDir)package\</PackageStageDir>
+      <PluginStageDir>$(PackageStageDir)plugins\$(ModName)\</PluginStageDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_StagePlugin Include="$(OutputPath)$(ModName).dll" />
+      <_StagePlugin Include="$(OutputPath)$(ModName).pdb" Condition="Exists('$(OutputPath)$(ModName).pdb')" />
+      <_StagePlugin Include="$(MSBuildThisFileDirectory)..\assets\fonts\DarumadropOne-Regular.ttf" />
+      <_StageMeta Include="$(ThunderstoreDir)manifest.json" />
+      <_StageMeta Include="$(ThunderstoreDir)README.md" />
+      <_StageMeta Include="$(ThunderstoreDir)CHANGELOG.md" Condition="Exists('$(ThunderstoreDir)CHANGELOG.md')" />
+      <_StageMeta Include="$(ThunderstoreDir)icon.png" Condition="Exists('$(ThunderstoreDir)icon.png')" />
+    </ItemGroup>
+    <RemoveDir Directories="$(PackageStageDir)" />
+    <MakeDir Directories="$(PluginStageDir)" />
+    <Copy SourceFiles="@(_StagePlugin)" DestinationFolder="$(PluginStageDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_StageMeta)" DestinationFolder="$(PackageStageDir)" SkipUnchangedFiles="true" />
+    <Message Text="Staged Thunderstore package contents at $(PackageStageDir)" Importance="high" />
+  </Target>
+
+  <!--
+    Pack target: zip the staged contents into dist/<ModName>-<Version>.zip in the layout
+    Thunderstore expects (manifest.json + icon.png + README.md at root, plugin DLL under plugins/).
+    Run with: dotnet build -t:Pack
+  -->
+  <Target Name="Pack" DependsOnTargets="Build">
+    <PropertyGroup>
+      <PackageZip>$(DistDir)$(ModAuthor)-$(ModName)-$(ModVersion).zip</PackageZip>
+    </PropertyGroup>
+    <MakeDir Directories="$(DistDir)" />
+    <Delete Files="$(PackageZip)" Condition="Exists('$(PackageZip)')" />
+    <ZipDirectory SourceDirectory="$(ArtifactsDir)package" DestinationFile="$(PackageZip)" />
+    <Message Text="Created Thunderstore package: $(PackageZip)" Importance="high" />
+  </Target>
+
+  <!--
+    Optional deploy: copy the staged plugin folder straight into the game's BepInEx/plugins
+    for fast iteration. Requires GameDir to be set. Run with: dotnet build -t:Deploy
+  -->
+  <Target Name="Deploy" DependsOnTargets="Build" Condition="'$(GameDir)' != ''">
+    <PropertyGroup>
+      <DeployDir>$(GameDir)\BepInEx\plugins\$(ModName)\</DeployDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(DeployDir)" />
+    <Copy SourceFiles="$(OutputPath)$(ModName).dll" DestinationFolder="$(DeployDir)" />
+    <Copy SourceFiles="$(OutputPath)$(ModName).pdb" DestinationFolder="$(DeployDir)" Condition="Exists('$(OutputPath)$(ModName).pdb')" />
+    <Copy SourceFiles="$(ThunderstoreDir)icon.png" DestinationFolder="$(DeployDir)" Condition="Exists('$(ThunderstoreDir)icon.png')" />
+    <Copy SourceFiles="$(ThunderstoreDir)manifest.json" DestinationFolder="$(DeployDir)" Condition="Exists('$(ThunderstoreDir)manifest.json')" />
+    <Copy SourceFiles="$(ThunderstoreDir)README.md" DestinationFolder="$(DeployDir)" Condition="Exists('$(ThunderstoreDir)README.md')" />
+    <Message Text="Deployed $(ModName) to $(DeployDir)" Importance="high" />
+  </Target>
+
+</Project>

@@ -1,0 +1,33 @@
+# Thunderstore CLI config. Used by `tcli publish`.
+# Install tcli once: dotnet tool install --global tcli
+# Publish: pwsh ./scripts/publish.ps1   (or)   tcli publish --file dist/<author>-<mod>-<version>.zip
+
+config-version = "0.0.0"
+
+[package]
+namespace      = "PrimeStrat"
+name           = "BingBongVoiceOverride"
+versionNumber  = "1.0.0"
+description    = "Drop custom audio files into the sounds folder to override Bing Bong's SFX in PEAK."
+websiteUrl     = "https://github.com/PrimeStrat/peak-bingbong-voice-override"
+containsNsfwContent = false
+
+[[package.dependencies]]
+# Reference dependencies as "Namespace-Name-Version".
+# Default: BepInEx 5.4.21 pack.
+# name = "BepInEx-BepInExPack-5.4.2100"
+
+[build]
+icon       = "thunderstore/icon.png"
+readme     = "thunderstore/README.md"
+outdir     = "dist"
+
+[[build.copy]]
+source = "build/package/plugins"
+target = "plugins"
+
+[publish]
+# The community/game slug on Thunderstore for PEAK.
+community = "peak"
+repository = "https://thunderstore.io"
+categories = ["audio", "mods"]

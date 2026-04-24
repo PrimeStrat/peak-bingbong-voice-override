@@ -1,0 +1,2 @@
+Place a 256x256 PNG named `icon.png` in this folder before publishing.
+Thunderstore rejects packages without a valid icon.
