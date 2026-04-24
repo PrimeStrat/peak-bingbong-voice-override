@@ -14,12 +14,12 @@ internal class UnifiedMenu : MonoBehaviour
     private Vector2 _soundsScroll = Vector2.zero;
     private string _importUrl = string.Empty;
     private int _activeTab = 0;
-    private readonly string[] _tabLabels = ["  Status  ", "  Sounds  ", "  Playback  ", "  Network  ", "  Importer  "];
+    private readonly string[] _tabLabels = ["  Status  ", "  Sounds  ", "  Playback  ", "  Network  ", "  Importer  ", "  Settings  "];
     private readonly Dictionary<string, string> _subtitleDrafts = new(StringComparer.OrdinalIgnoreCase);
 
     private Vector2 _playbackScroll = Vector2.zero;
     private int _playerQueueIndex = 0;
-    private bool _playbackSettingsExpanded = false;
+    private Vector2 _settingsScroll = Vector2.zero;
     private GUIStyle? _overlayStyle;
     private Font? _overlayStyleFont;
     private int _overlayStyleFontSize;
@@ -312,6 +312,7 @@ internal class UnifiedMenu : MonoBehaviour
             case 2: DrawPlaybackTab(); break;
             case 3: DrawNetworkTab(); break;
             case 4: DrawImporterTab(); break;
+            case 5: DrawSettingsTab(); break;
         }
 
         GUILayout.FlexibleSpace();
@@ -420,10 +421,14 @@ internal class UnifiedMenu : MonoBehaviour
     private void DrawSoundsTab()
     {
         bool isClient = BingBongNetworkSync.IsConnectedAsClient;
+        bool canEditSelection = !isClient || BingBongNetworkSync.ClientAllowSelectionEdit;
+        bool canEditSubtitle = !isClient || BingBongNetworkSync.ClientAllowSubtitleEdit;
         if (isClient)
         {
             GUI.color = new Color(1f, 1f, 0.5f);
-            GUILayout.Label("Connected as client -- selection is synced from the host. Changes here are local only.");
+            string selPerm = BingBongNetworkSync.ClientAllowSelectionEdit ? "can edit" : "read-only";
+            string subPerm = BingBongNetworkSync.ClientAllowSubtitleEdit ? "can edit" : "read-only";
+            GUILayout.Label($"Connected as client -- selection: {selPerm}, subtitles: {subPerm}. Synced from host on join.");
             GUI.color = Color.white;
             GUILayout.Space(4f);
         }
@@ -431,7 +436,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.Label("Check the clips that should be in the random pool. Click 'Play' to force-pick one now.");
 
         GUILayout.BeginHorizontal();
-        GUI.enabled = !isClient;
+        GUI.enabled = canEditSelection;
         if (GUILayout.Button("Enable All")) SetAllEnabled(true);
         if (GUILayout.Button("Disable All")) SetAllEnabled(false);
         GUI.enabled = true;
@@ -449,11 +454,14 @@ internal class UnifiedMenu : MonoBehaviour
 
             bool enabled;
             if (!Plugin.EnabledClips.TryGetValue(clip.name, out enabled)) enabled = true;
+            GUI.enabled = canEditSelection;
             bool newEnabled = GUILayout.Toggle(enabled, "", GUILayout.Width(20f));
-            if (newEnabled != enabled)
+            GUI.enabled = true;
+            if (newEnabled != enabled && canEditSelection)
             {
                 Plugin.EnabledClips[clip.name] = newEnabled;
                 Plugin.SaveSelection();
+                BingBongNetworkSync.BroadcastClipEnabled(clip.name, newEnabled);
             }
 
             GUILayout.Label($"[{i + 1}] {clip.name} ({clip.length:F1}s)", GUILayout.ExpandWidth(true));
@@ -485,17 +493,21 @@ internal class UnifiedMenu : MonoBehaviour
             if (!newDraft.Equals(draft, StringComparison.Ordinal))
                 _subtitleDrafts[clip.name] = newDraft;
 
+            GUI.enabled = canEditSubtitle;
             if (GUILayout.Button("Save", GUILayout.Width(54f)))
             {
                 Plugin.SaveSubtitleOverrideForClip(clip.name, newDraft);
                 _subtitleDrafts[clip.name] = newDraft;
+                BingBongNetworkSync.BroadcastSubtitleUpdate(clip.name, newDraft);
             }
 
             if (GUILayout.Button("Clear", GUILayout.Width(54f)))
             {
                 Plugin.SaveSubtitleOverrideForClip(clip.name, string.Empty);
                 _subtitleDrafts[clip.name] = string.Empty;
+                BingBongNetworkSync.BroadcastSubtitleUpdate(clip.name, string.Empty);
             }
+            GUI.enabled = true;
             GUILayout.EndHorizontal();
 
             if (Plugin.TimedSubtitleOverrides.ContainsKey(clip.name))
@@ -525,6 +537,8 @@ internal class UnifiedMenu : MonoBehaviour
     // Draws the Playback tab as a full music player with transport controls and a scrollable queue. returns: void
     private void DrawPlaybackTab()
     {
+        bool isClient = BingBongNetworkSync.IsConnectedAsClient;
+        bool canPlay = !isClient || BingBongNetworkSync.ClientAllowPlayback;
         List<AudioClip> active = Plugin.GetActiveClips();
         bool isPlaying = Plugin.PluginAudioSource != null && Plugin.PluginAudioSource.isPlaying;
         bool isPaused = Plugin.PluginAudioSource != null
@@ -551,7 +565,7 @@ internal class UnifiedMenu : MonoBehaviour
         float clipTime = (isPlaying || isPaused) ? Plugin.PluginAudioSource!.time : 0f;
         float clipLen = nowPlaying != null ? Mathf.Max(0.01f, nowPlaying.length) : 1f;
         GUILayout.Label(FormatTime(clipTime), GUILayout.Width(40f));
-        GUI.enabled = nowPlaying != null;
+        GUI.enabled = canPlay && nowPlaying != null;
         float newTime = GUILayout.HorizontalSlider(clipTime, 0f, clipLen);
         if (GUI.enabled && Mathf.Abs(newTime - clipTime) > 0.05f)
             Plugin.PluginAudioSource!.time = Mathf.Clamp(newTime, 0f, clipLen - 0.01f);
@@ -561,6 +575,7 @@ internal class UnifiedMenu : MonoBehaviour
 
         GUILayout.Space(4f);
 
+        GUI.enabled = canPlay;
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("<< Prev", GUILayout.Width(80f)))
         {
@@ -593,15 +608,7 @@ internal class UnifiedMenu : MonoBehaviour
             }
         }
         GUILayout.EndHorizontal();
-
-        GUILayout.Space(4f);
-
-        GUILayout.BeginHorizontal();
-        Plugin.MusicMode.Value = GUILayout.Toggle(Plugin.MusicMode.Value, "  Music Mode", GUILayout.Width(120f));
-        GUILayout.Space(8f);
-        GUILayout.Label($"Vol: {Plugin.VolumeMultiplier.Value:F2}x", GUILayout.Width(72f));
-        Plugin.VolumeMultiplier.Value = GUILayout.HorizontalSlider(Plugin.VolumeMultiplier.Value, 0f, 3f);
-        GUILayout.EndHorizontal();
+        GUI.enabled = true;
 
         GUILayout.Space(6f);
 
@@ -623,40 +630,17 @@ internal class UnifiedMenu : MonoBehaviour
             }
             GUILayout.Label($"{i + 1}. {clip.name}  ({FormatTime(clip.length)})", GUILayout.ExpandWidth(true));
             GUI.color = Color.white;
+            GUI.enabled = canPlay;
             if (GUILayout.Button("Play", GUILayout.Width(50f)))
             {
                 _playerQueueIndex = i;
                 Plugin.PlayThroughPluginSource(clip);
             }
+            GUI.enabled = true;
             GUILayout.EndHorizontal();
         }
         GUILayout.EndScrollView();
 
-        GUILayout.Space(4f);
-
-        if (GUILayout.Button(_playbackSettingsExpanded ? "v Settings" : "> Settings", GUILayout.Width(100f)))
-            _playbackSettingsExpanded = !_playbackSettingsExpanded;
-
-        if (_playbackSettingsExpanded)
-        {
-            bool globalDistance = !Plugin.ShortRangeOnly.Value;
-            bool newGlobal = GUILayout.Toggle(globalDistance, "  Global distance (hear anywhere)");
-            Plugin.ShortRangeOnly.Value = !newGlobal;
-            if (Plugin.ShortRangeOnly.Value)
-            {
-                GUILayout.Label($"  Max distance: {Plugin.ShortRangeMaxDistance.Value:F0} m");
-                Plugin.ShortRangeMaxDistance.Value = GUILayout.HorizontalSlider(Plugin.ShortRangeMaxDistance.Value, 5f, 200f);
-            }
-            Plugin.AutoPlayEnabled.Value = GUILayout.Toggle(Plugin.AutoPlayEnabled.Value,
-                "  Auto-play random clip on a timer");
-            if (Plugin.AutoPlayEnabled.Value)
-            {
-                GUILayout.Label($"  Interval: {Plugin.AutoPlayIntervalSeconds.Value:F0} s");
-                Plugin.AutoPlayIntervalSeconds.Value = GUILayout.HorizontalSlider(Plugin.AutoPlayIntervalSeconds.Value, 5f, 300f);
-            }
-            Plugin.TimedSubtitlesEnabled.Value = GUILayout.Toggle(Plugin.TimedSubtitlesEnabled.Value,
-                "  Timed sing-along subtitles [experimental]");
-        }
     }
 
     // Formats a duration in seconds as M:SS.
@@ -668,20 +652,14 @@ internal class UnifiedMenu : MonoBehaviour
         return $"{s / 60}:{s % 60:D2}";
     }
 
-    // Draws the Network tab with sync status and size guard. returns: void
+    // Draws the Network tab with live sync status and per-client progress. returns: void
     private void DrawNetworkTab()
     {
         GUILayout.Label($"Sync server: {BingBongNetworkSync.StatusText}");
-        GUILayout.Label("Files larger than the limit below will not be served or downloaded, keeping joins fast.");
-        GUILayout.Label($"Max sync file size: {Plugin.MaxSyncFileSizeKb.Value} KB");
-        Plugin.MaxSyncFileSizeKb.Value = (int)GUILayout.HorizontalSlider(Plugin.MaxSyncFileSizeKb.Value, 64f, 8192f);
         GUILayout.Space(6f);
 
         if (BingBongNetworkSync.IsHosting)
         {
-            Plugin.AllowClientImports.Value = GUILayout.Toggle(Plugin.AllowClientImports.Value,
-                "  Allow any client to upload new sounds to this host");
-
             GUILayout.Space(4f);
             int servedFiles = BingBongNetworkSync.GetServedAudioFileCount();
             List<string> unsynced = BingBongNetworkSync.GetUnsyncedPlayerNames();
@@ -728,10 +706,6 @@ internal class UnifiedMenu : MonoBehaviour
         }
         else if (!string.IsNullOrEmpty(BingBongNetworkSync.ActiveHostAddress))
         {
-            string importLabel = BingBongNetworkSync.HostAllowsClientImports
-                ? "Host allows client imports: YES"
-                : "Host allows client imports: NO (host must enable AllowClientImports)";
-            GUILayout.Label(importLabel);
             GUILayout.Label($"Local clips loaded: {Plugin.CustomClips.Count}");
             if (!BingBongNetworkSync.HasReachedHost)
             {
@@ -750,6 +724,79 @@ internal class UnifiedMenu : MonoBehaviour
         }
     }
 
+    // Draws the Settings tab with global playback, network, and menu options. returns: void
+    private void DrawSettingsTab()
+    {
+        bool isClient = BingBongNetworkSync.IsConnectedAsClient;
+        bool isHost = BingBongNetworkSync.IsHosting;
+        bool canSettings = !isClient || BingBongNetworkSync.ClientAllowSettingsChange;
+
+        _settingsScroll = GUILayout.BeginScrollView(_settingsScroll);
+
+        SectionHeader("Playback");
+        GUI.enabled = canSettings;
+        Plugin.MusicMode.Value = GUILayout.Toggle(Plugin.MusicMode.Value, "  Music Mode");
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"  Volume: {Plugin.VolumeMultiplier.Value:F2}x", GUILayout.Width(130f));
+        Plugin.VolumeMultiplier.Value = GUILayout.HorizontalSlider(Plugin.VolumeMultiplier.Value, 0f, 3f);
+        GUILayout.EndHorizontal();
+        bool globalDistance = !Plugin.ShortRangeOnly.Value;
+        Plugin.ShortRangeOnly.Value = !GUILayout.Toggle(globalDistance, "  Global distance (hear anywhere)");
+        if (Plugin.ShortRangeOnly.Value)
+        {
+            GUILayout.Label($"  Max distance: {Plugin.ShortRangeMaxDistance.Value:F0} m");
+            Plugin.ShortRangeMaxDistance.Value = GUILayout.HorizontalSlider(Plugin.ShortRangeMaxDistance.Value, 5f, 200f);
+        }
+        Plugin.AutoPlayEnabled.Value = GUILayout.Toggle(Plugin.AutoPlayEnabled.Value, "  Auto-play random clip on a timer");
+        if (Plugin.AutoPlayEnabled.Value)
+        {
+            GUILayout.Label($"  Interval: {Plugin.AutoPlayIntervalSeconds.Value:F0} s");
+            Plugin.AutoPlayIntervalSeconds.Value = GUILayout.HorizontalSlider(Plugin.AutoPlayIntervalSeconds.Value, 5f, 300f);
+        }
+        Plugin.TimedSubtitlesEnabled.Value = GUILayout.Toggle(Plugin.TimedSubtitlesEnabled.Value, "  Timed sing-along subtitles [experimental]");
+        GUI.enabled = true;
+
+        GUILayout.Space(8f);
+        SectionHeader("Network");
+        GUILayout.Label($"  Max sync file size: {Plugin.MaxSyncFileSizeKb.Value} KB");
+        Plugin.MaxSyncFileSizeKb.Value = (int)GUILayout.HorizontalSlider(Plugin.MaxSyncFileSizeKb.Value, 64f, 8192f);
+        GUILayout.Space(4f);
+        if (isHost)
+        {
+            GUILayout.Label("Client permissions:");
+            Plugin.AllowClientImports.Value = GUILayout.Toggle(Plugin.AllowClientImports.Value,
+                "  Allow any client to upload new sounds to this host");
+            Plugin.AllowClientPlayback.Value = GUILayout.Toggle(Plugin.AllowClientPlayback.Value,
+                "  Allow clients to control playback (play/pause/stop/force-next)");
+            Plugin.AllowClientSubtitleEdit.Value = GUILayout.Toggle(Plugin.AllowClientSubtitleEdit.Value,
+                "  Allow clients to save subtitle edits");
+            Plugin.AllowClientSelectionEdit.Value = GUILayout.Toggle(Plugin.AllowClientSelectionEdit.Value,
+                "  Allow clients to toggle clip enabled states");
+            Plugin.AllowClientSettingsChange.Value = GUILayout.Toggle(Plugin.AllowClientSettingsChange.Value,
+                "  Allow clients to change settings (volume, mode, autoplay)");
+        }
+        else if (isClient)
+        {
+            GUILayout.Label("Host permissions (read-only):");
+            string yn(bool v) => v ? "allowed" : "host-locked";
+            GUILayout.Label($"  Imports:           {yn(BingBongNetworkSync.HostAllowsClientImports)}");
+            GUILayout.Label($"  Playback:          {yn(BingBongNetworkSync.ClientAllowPlayback)}");
+            GUILayout.Label($"  Subtitle editing:  {yn(BingBongNetworkSync.ClientAllowSubtitleEdit)}");
+            GUILayout.Label($"  Clip selection:    {yn(BingBongNetworkSync.ClientAllowSelectionEdit)}");
+            GUILayout.Label($"  Settings changes:  {yn(BingBongNetworkSync.ClientAllowSettingsChange)}");
+        }
+
+        GUILayout.Space(8f);
+        SectionHeader("Menu");
+        Plugin.ForceEnableRefresh.Value = GUILayout.Toggle(Plugin.ForceEnableRefresh.Value,
+            "  Enable Refresh without holding Bing Bong");
+        GUI.color = new Color(0.65f, 0.65f, 0.65f);
+        GUILayout.Label($"  Menu toggle key: [{Plugin.MenuToggleKey.Value}]  (change in BepInEx config file)");
+        GUI.color = Color.white;
+
+        GUILayout.EndScrollView();
+    }
+
     // Draws the Importer tab with the URL field. returns: void
     private void DrawImporterTab()
     {
@@ -757,8 +804,8 @@ internal class UnifiedMenu : MonoBehaviour
         {
             GUI.color = new Color(1f, 1f, 0.5f);
             GUILayout.Label(BingBongNetworkSync.HostAllowsClientImports
-                ? "Connected as client -- downloads will be sent to the host (AllowClientImports is ON)."
-                : "Connected as client -- host does not allow client imports.");
+                ? "Connected as client - downloads will be sent to the host (AllowClientImports is ON)."
+                : "Connected as client - host does not allow client imports.");
             GUI.color = Color.white;
             GUILayout.Space(4f);
         }
