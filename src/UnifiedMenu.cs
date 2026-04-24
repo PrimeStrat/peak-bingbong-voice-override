@@ -1,10 +1,9 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
-
 namespace BingBongVoiceOverride;
 
-/// <summary>Single in-game IMGUI window with tabbed sections for status, sound selection, playback, network, and the URL importer.</summary>
+/// Single in-game IMGUI window with tabbed sections for status, sound selection, playback, network, and the URL importer.
 internal class UnifiedMenu : MonoBehaviour
 {
     private Rect _windowRect = new Rect(0f, 0f, 620f, 520f);
@@ -12,8 +11,9 @@ internal class UnifiedMenu : MonoBehaviour
     private Vector2 _soundsScroll = Vector2.zero;
     private string _importUrl = string.Empty;
     private int _activeTab = 0;
-    private readonly string[] _tabLabels = { "Status", "Sounds", "Playback", "Network", "Importer" };
-    private readonly Dictionary<string, string> _subtitleDrafts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private readonly string[] _tabLabels = ["Status", "Sounds", "Playback", "Network", "Importer"];
+    private readonly Dictionary<string, string> _subtitleDrafts = new(StringComparer.OrdinalIgnoreCase);
+    private string _manualHostIp = string.Empty;
     private GUIStyle? _overlayStyle;
     private Font? _overlayStyleFont;
     private int _overlayStyleFontSize;
@@ -24,7 +24,7 @@ internal class UnifiedMenu : MonoBehaviour
     private const float TimedStrokeWidth = 3f;
     private const int TimedFontSizeDefault = 28;
 
-    /// <summary>Polls the menu toggle key each frame.</summary>
+    /// Polls the menu toggle key each frame.
     /// <returns>void</returns>
     private void Update()
     {
@@ -32,7 +32,7 @@ internal class UnifiedMenu : MonoBehaviour
             Plugin.SetMenuVisible(!Plugin.MenuVisible);
     }
 
-    /// <summary>Draws the menu window when visible.</summary>
+    /// Draws the menu window when visible.
     /// <returns>void</returns>
     private void OnGUI()
     {
@@ -51,18 +51,16 @@ internal class UnifiedMenu : MonoBehaviour
             $"BingBong Voice Override  v{MyPluginInfo.PLUGIN_VERSION}  [{Plugin.MenuToggleKey.Value} to close]");
     }
 
-    /// <summary>Draws timed subtitle fallback text with a hardcoded PEAK-like look from the reference screenshot.</summary>
+    /// Draws timed subtitle fallback text with a hardcoded PEAK-like look from the reference screenshot.
     /// <returns>void</returns>
     private void DrawSubtitleOverlay()
     {
-        bool overlayOnly = Plugin.ShouldForceOverlaySubtitles();
         bool forceOverlay = Plugin.IsTimedSubtitleActive
             && Plugin.UseNativeBingBongAPI.Value
             && !Plugin.UseNativeSubtitleWithCustomAudio.Value;
-        if (!Plugin.ShowSubtitleOverlay.Value && !forceOverlay && !overlayOnly) return;
+        if (!Plugin.ShowSubtitleOverlay.Value && !forceOverlay) return;
         if (Plugin.MenuVisible) return;
-        bool timed = Plugin.IsTimedSubtitleActive;
-        if (!timed && !overlayOnly) return;
+        if (!Plugin.IsTimedSubtitleActive) return;
         if (string.IsNullOrWhiteSpace(Plugin.ActiveSubtitle)) return;
         if (Time.unscaledTime > Plugin.ActiveSubtitleUntil) return;
 
@@ -126,7 +124,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.matrix = savedMatrix;
     }
 
-    /// <summary>Resolves a font for timed subtitles by scanning fonts already loaded by the game. Falls back to null (uses default GUI skin font).</summary>
+    /// Resolves a font for timed subtitles by scanning fonts already loaded by the game. Falls back to null (uses default GUI skin font).
     /// <returns>A loaded game Font, or null to use the default.</returns>
     private Font? ResolveTimedSubtitleFont()
     {
@@ -148,7 +146,7 @@ internal class UnifiedMenu : MonoBehaviour
         return null;
     }
 
-    /// <summary>Renders the tabbed window contents.</summary>
+    /// Renders the tabbed window contents.
     /// <param name="windowId">Unity window identifier.</param>
     /// <returns>void</returns>
     private void DrawWindow(int windowId)
@@ -172,7 +170,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    /// <summary>Draws the Status tab.</summary>
+    /// Draws the Status tab.
     /// <returns>void</returns>
     private void DrawStatusTab()
     {
@@ -192,7 +190,7 @@ internal class UnifiedMenu : MonoBehaviour
             GUILayout.Label("(pick up Bing Bong, or set ForceEnableRefresh = true)");
     }
 
-    /// <summary>Draws the Sounds tab with per-clip enable checkboxes and a play-now button.</summary>
+    /// Draws the Sounds tab with per-clip enable checkboxes and a play-now button.
     /// <returns>void</returns>
     private void DrawSoundsTab()
     {
@@ -285,7 +283,7 @@ internal class UnifiedMenu : MonoBehaviour
             Plugin.ForcedNextClipName = string.Empty;
     }
 
-    /// <summary>Draws the Playback tab with volume, distance, autoplay, and music mode controls.</summary>
+    /// Draws the Playback tab with volume, distance, autoplay, and music mode controls.
     /// <returns>void</returns>
     private void DrawPlaybackTab()
     {
@@ -318,7 +316,7 @@ internal class UnifiedMenu : MonoBehaviour
 
         GUILayout.Space(8f);
         Plugin.TimedSubtitlesEnabled.Value = GUILayout.Toggle(Plugin.TimedSubtitlesEnabled.Value,
-            "  Timed sing-along subtitles (when off, only the single subtitle line is shown)");
+            "  Timed sing-along subtitles [experimental] (when off, only the single subtitle line is shown)");
 
         GUILayout.Space(8f);
         GUILayout.BeginHorizontal();
@@ -335,7 +333,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    /// <summary>Draws the Network tab with sync status and size guard.</summary>
+    /// Draws the Network tab with sync status and size guard.
     /// <returns>void</returns>
     private void DrawNetworkTab()
     {
@@ -344,9 +342,34 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.Label($"Max sync file size: {Plugin.MaxSyncFileSizeKb.Value} KB");
         Plugin.MaxSyncFileSizeKb.Value = (int)GUILayout.HorizontalSlider(Plugin.MaxSyncFileSizeKb.Value, 64f, 8192f);
         GUILayout.Space(6f);
+
+        if (BingBongNetworkSync.IsHosting)
+        {
+            Plugin.AllowClientImports.Value = GUILayout.Toggle(Plugin.AllowClientImports.Value,
+                "  Allow any client to upload new sounds to this host");
+        }
+        else if (!string.IsNullOrEmpty(BingBongNetworkSync.ActiveHostAddress))
+        {
+            string importLabel = BingBongNetworkSync.HostAllowsClientImports
+                ? "Host allows client imports: YES"
+                : "Host allows client imports: NO (host must enable AllowClientImports)";
+            GUILayout.Label(importLabel);
+        }
+
+        GUILayout.Space(6f);
+        GUILayout.Label("Manual sync (enter the host's LAN IP if auto-detect did not fire):");
+        GUILayout.BeginHorizontal();
+        _manualHostIp = GUILayout.TextField(_manualHostIp, GUILayout.Width(200f));
+        if (GUILayout.Button("Sync from Host"))
+        {
+            string ip = _manualHostIp.Trim();
+            if (!string.IsNullOrWhiteSpace(ip))
+                BingBongNetworkSync.OnPlayerJoined(ip);
+        }
+        GUILayout.EndHorizontal();
     }
 
-    /// <summary>Draws the Importer tab with the URL field.</summary>
+    /// Draws the Importer tab with the URL field.
     /// <returns>void</returns>
     private void DrawImporterTab()
     {
@@ -356,7 +379,7 @@ internal class UnifiedMenu : MonoBehaviour
 
         GUILayout.Space(6f);
         Plugin.FetchTimedSubtitlesOnImport.Value = GUILayout.Toggle(Plugin.FetchTimedSubtitlesOnImport.Value,
-            "  Also fetch timed sing-along subtitles for this import (yt-dlp captions)");
+            "  Also fetch timed sing-along subtitles for this import [experimental] (yt-dlp captions)"); ;
 
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Download + Refresh"))
@@ -366,7 +389,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    /// <summary>Sets every loaded clip's enabled flag and persists the change.</summary>
+    /// Sets every loaded clip's enabled flag and persists the change.
     /// <param name="value">True to enable all, false to disable all.</param>
     /// <returns>void</returns>
     private void SetAllEnabled(bool value)
@@ -376,7 +399,7 @@ internal class UnifiedMenu : MonoBehaviour
         Plugin.SaveSelection();
     }
 
-    /// <summary>Opens the sounds folder in the OS file explorer.</summary>
+    /// Opens the sounds folder in the OS file explorer.
     /// <returns>void</returns>
     private void OpenSoundsFolder()
     {
@@ -390,7 +413,7 @@ internal class UnifiedMenu : MonoBehaviour
         }
     }
 
-    /// <summary>Returns a short tag showing whether a subtitle JSON override is linked to the clip.</summary>
+    /// Returns a short tag showing whether a subtitle JSON override is linked to the clip.
     /// <param name="clipName">Clip name (no extension) to look up in SubtitleOverrides.</param>
     /// <returns>"[S]", "[T]", "[ST]", or "[ ]" depending on which overrides are present.</returns>
     private static string SubtitleLinkTag(string clipName)

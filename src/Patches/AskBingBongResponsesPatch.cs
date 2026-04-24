@@ -1,30 +1,29 @@
 using System;
 using HarmonyLib;
 using UnityEngine;
-
 namespace BingBongVoiceOverride.Patches;
 
-/// <summary>Mirrors BingBongVoiceLineAPI's discovery hooks so we catch every Action_AskBingBong instance the moment it enters the scene and rewrite its responses to point at our clips.</summary>
+/// Mirrors BingBongVoiceLineAPI's discovery hooks so we catch every Action_AskBingBong instance the moment it enters the scene and rewrite its responses to point at our clips.
 [HarmonyPatch(typeof(UnityEngine.Object))]
 internal static class AskBingBongInstantiateDiscoveryPatch
 {
-    /// <summary>Postfix on the single-arg Object.Instantiate. Walks the result for Action_AskBingBong and triggers a response rewrite.</summary>
+    /// Postfix on the single-arg Object.Instantiate. Walks the result for Action_AskBingBong and triggers a response rewrite.
     /// <param name="__result">The newly instantiated Unity object.</param>
     /// <returns>void</returns>
     [HarmonyPatch(typeof(UnityEngine.Object), nameof(UnityEngine.Object.Instantiate), new Type[] { typeof(UnityEngine.Object) })]
     [HarmonyPostfix]
     private static void InstantiatePostfix(UnityEngine.Object __result)
     {
-        if (!Plugin.ShouldUseNativeSubtitleInfrastructure()) return;
+        if (!Plugin.UseNativeBingBongAPI.Value) return;
         AskBingBongDiscoveryHelper.TryHandle(__result);
     }
 }
 
-/// <summary>Catches Action_AskBingBong components that appear via GameObject.AddComponent so freshly composed Bing Bong objects are also rewritten.</summary>
+/// Catches Action_AskBingBong components that appear via GameObject.AddComponent so freshly composed Bing Bong objects are also rewritten.
 [HarmonyPatch(typeof(GameObject))]
 internal static class AskBingBongAddComponentDiscoveryPatch
 {
-    /// <summary>Postfix on AddComponent(Type) that rewrites responses when an Action_AskBingBong was added.</summary>
+    /// Postfix on AddComponent(Type) that rewrites responses when an Action_AskBingBong was added.
     /// <param name="__instance">GameObject the component was added to.</param>
     /// <param name="__result">The created component.</param>
     /// <returns>void</returns>
@@ -32,15 +31,15 @@ internal static class AskBingBongAddComponentDiscoveryPatch
     [HarmonyPostfix]
     private static void AddComponentPostfix(GameObject __instance, ref Component __result)
     {
-        if (!Plugin.ShouldUseNativeSubtitleInfrastructure()) return;
+        if (!Plugin.UseNativeBingBongAPI.Value) return;
         AskBingBongDiscoveryHelper.TryHandle((UnityEngine.Object)__result ?? __instance);
     }
 }
 
-/// <summary>Shared helpers for the Action_AskBingBong discovery patches.</summary>
+/// Shared helpers for the Action_AskBingBong discovery patches.
 internal static class AskBingBongDiscoveryHelper
 {
-    /// <summary>Locates an Action_AskBingBong component on the given object or its descendants and rewrites its responses array.</summary>
+    /// Locates an Action_AskBingBong component on the given object or its descendants and rewrites its responses array.
     /// <param name="created">A freshly instantiated or composed Unity object.</param>
     /// <returns>void</returns>
     internal static void TryHandle(UnityEngine.Object created)

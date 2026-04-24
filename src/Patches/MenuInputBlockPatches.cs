@@ -1,12 +1,12 @@
 using HarmonyLib;
-
+using UnityEngine;
 namespace BingBongVoiceOverride.Patches;
 
-/// <summary>Blocks mouse-look axes while the unified menu is open so gameplay camera movement pauses like the Escape menu.</summary>
+/// Blocks mouse-look axes while the unified menu is open so gameplay camera movement pauses like the Escape menu.
 [HarmonyPatch(typeof(UnityEngine.Input), nameof(UnityEngine.Input.GetAxis), new[] { typeof(string) })]
 internal static class BlockMouseAxisPatch
 {
-    /// <summary>Overrides Mouse X/Mouse Y axis values to zero while the menu is visible.</summary>
+    /// Overrides Mouse X/Mouse Y axis values to zero while the menu is visible.
     /// <param name="axisName">Axis name requested by the game.</param>
     /// <param name="__result">Axis value to return when overridden.</param>
     /// <returns>False to skip original Input.GetAxis for blocked mouse axes; true otherwise.</returns>
@@ -39,11 +39,11 @@ internal static class BlockMouseAxisPatch
     }
 }
 
-/// <summary>Blocks raw mouse-look axes while the unified menu is open so camera movement stays frozen.</summary>
+/// Blocks raw mouse-look axes while the unified menu is open so camera movement stays frozen.
 [HarmonyPatch(typeof(UnityEngine.Input), nameof(UnityEngine.Input.GetAxisRaw), new[] { typeof(string) })]
 internal static class BlockMouseAxisRawPatch
 {
-    /// <summary>Overrides Mouse X/Mouse Y raw axis values to zero while the menu is visible.</summary>
+    /// Overrides Mouse X/Mouse Y raw axis values to zero while the menu is visible.
     /// <param name="axisName">Raw axis name requested by the game.</param>
     /// <param name="__result">Raw axis value to return when overridden.</param>
     /// <returns>False to skip original Input.GetAxisRaw for blocked mouse axes; true otherwise.</returns>

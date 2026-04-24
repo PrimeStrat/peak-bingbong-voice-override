@@ -7,14 +7,14 @@ using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using BingBongVoiceOverride.Patches;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Networking;
-using BingBongVoiceOverride.Patches;
-
 namespace BingBongVoiceOverride;
 
 [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
@@ -39,7 +39,7 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> ShowSubtitleOverlay = null!;
     internal static ConfigEntry<bool> UseNativeBingBongAPI = null!;
     internal static ConfigEntry<bool> UseNativeSubtitleWithCustomAudio = null!;
-    internal static ConfigEntry<string> SubtitleTestMode = null!;
+    internal static ConfigEntry<bool> AllowClientImports = null!;
     internal static readonly List<AudioClip> CustomClips = new();
     internal static readonly Dictionary<string, string> SubtitleOverrides =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -51,25 +51,25 @@ public class Plugin : BaseUnityPlugin
         new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     internal static readonly List<AudioSource> ManagedSources = new List<AudioSource>();
 
-    /// <summary>When set, the next override pick uses this clip name once instead of random selection.</summary>
+    /// When set, the next override pick uses this clip name once instead of random selection.
     internal static string ForcedNextClipName = string.Empty;
 
-    /// <summary>AudioSource owned by the plugin GameObject, used for music mode and auto-play.</summary>
+    /// AudioSource owned by the plugin GameObject, used for music mode and auto-play.
     internal static AudioSource PluginAudioSource = null!;
 
-    /// <summary>Transform that the plugin AudioSource follows in world space while playing detached Bing Bong audio. Null disables following.</summary>
+    /// Transform that the plugin AudioSource follows in world space while playing detached Bing Bong audio. Null disables following.
     internal static UnityEngine.Transform? FollowTransform = null;
 
-    /// <summary>Name of the last custom clip that played, or "none".</summary>
+    /// Name of the last custom clip that played, or "none".
     internal static string DebugLastPlayed = "none";
 
-    /// <summary>True once the initial or refreshed clip load coroutine has completed.</summary>
+    /// True once the initial or refreshed clip load coroutine has completed.
     internal static bool ClipsReady = false;
 
-    /// <summary>Set by a game-specific Harmony patch when the local player picks up or drops Bing Bong.</summary>
+    /// Set by a game-specific Harmony patch when the local player picks up or drops Bing Bong.
     internal static bool IsHoldingBingBong = false;
 
-    /// <summary>True when any tracked Bing Bong / plugin AudioSource is currently playing. Used as a fallback hold signal when no game-side hold patch is wired.</summary>
+    /// True when any tracked Bing Bong / plugin AudioSource is currently playing. Used as a fallback hold signal when no game-side hold patch is wired.
     internal static bool IsBingBongAudioActive
     {
         get
@@ -84,118 +84,37 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>True when subtitle override behavior should run: holding Bing Bong, or any tracked override source is actively playing.</summary>
+    /// True when subtitle override behavior should run: holding Bing Bong, or any tracked override source is actively playing.
     internal static bool ShouldRunSubtitleOverride
     {
         get { return IsHoldingBingBong || IsBingBongAudioActive; }
     }
 
-    /// <summary>Current subtitle text chosen for the most recently played override clip.</summary>
+    /// Current subtitle text chosen for the most recently played override clip.
     internal static string ActiveSubtitle = string.Empty;
 
-    /// <summary>Time.unscaledTime timestamp when the current subtitle should stop displaying.</summary>
+    /// Time.unscaledTime timestamp when the current subtitle should stop displaying.
     internal static float ActiveSubtitleUntil = 0f;
     internal static string ActiveTimedSubtitleClipName = string.Empty;
     internal static float ActiveTimedSubtitleStart = 0f;
     internal static float ActiveTimedSubtitleLastTick = 0f;
 
-    /// <summary>Saved single-line subtitle pushed to the native Bing Bong UI while a timed sing-along track plays.</summary>
+    /// Saved single-line subtitle pushed to the native Bing Bong UI while a timed sing-along track plays.
     internal static string ActiveNativeSubtitle = string.Empty;
 
-    /// <summary>The AudioClip driving the current timed subtitle track. Null when no timed subtitle is active.</summary>
+    /// The AudioClip driving the current timed subtitle track. Null when no timed subtitle is active.
     internal static AudioClip? ActiveTimedSubtitleClip = null;
 
-    /// <summary>True when a timed sing-along track is currently driving subtitles for the held Bing Bong clip.</summary>
+    /// True when a timed sing-along track is currently driving subtitles for the held Bing Bong clip.
     internal static bool IsTimedSubtitleActive
     {
         get { return TimedSubtitlesEnabled != null && TimedSubtitlesEnabled.Value && !string.IsNullOrEmpty(ActiveTimedSubtitleClipName); }
     }
 
-    internal enum SubtitleMode
-    {
-        Hybrid,
-        NativeOnly,
-        PatchedOnly,
-        OverlayOnly,
-        SingleNativeTimedOverlay,
-    }
-
-    /// <summary>Returns the configured subtitle test mode. Invalid values fall back to Hybrid.</summary>
-    /// <returns>SubtitleMode</returns>
-    internal static SubtitleMode GetSubtitleMode()
-    {
-        if (SubtitleTestMode == null || string.IsNullOrWhiteSpace(SubtitleTestMode.Value))
-            return SubtitleMode.Hybrid;
-        string raw = SubtitleTestMode.Value.Trim();
-        if (raw.Equals("nativeonly", StringComparison.OrdinalIgnoreCase))
-            return SubtitleMode.NativeOnly;
-        if (raw.Equals("patchedonly", StringComparison.OrdinalIgnoreCase))
-            return SubtitleMode.PatchedOnly;
-        if (raw.Equals("overlayonly", StringComparison.OrdinalIgnoreCase))
-            return SubtitleMode.OverlayOnly;
-        if (raw.Equals("singlenativetimedoverlay", StringComparison.OrdinalIgnoreCase)
-            || raw.Equals("single_native_timed_overlay", StringComparison.OrdinalIgnoreCase)
-            || raw.Equals("single-native-timed-overlay", StringComparison.OrdinalIgnoreCase))
-            return SubtitleMode.SingleNativeTimedOverlay;
-        return SubtitleMode.Hybrid;
-    }
-
-    /// <summary>True when native subtitle response infrastructure (bridge resolve and response rewrites) should be active.</summary>
-    /// <returns>bool</returns>
-    internal static bool ShouldUseNativeSubtitleInfrastructure()
-    {
-        SubtitleMode mode = GetSubtitleMode();
-        if (mode == SubtitleMode.NativeOnly)
-            return true;
-        if (mode == SubtitleMode.SingleNativeTimedOverlay)
-            return true;
-        if (mode == SubtitleMode.Hybrid)
-            return UseNativeBingBongAPI.Value;
-        return false;
-    }
-
-    /// <summary>True when native subtitle table writes should run for the current test mode.</summary>
-    /// <returns>bool</returns>
-    internal static bool ShouldUseNativeSubtitles()
-    {
-        SubtitleMode mode = GetSubtitleMode();
-        if (mode == SubtitleMode.NativeOnly)
-            return true;
-        if (mode == SubtitleMode.SingleNativeTimedOverlay)
-            return true;
-        if (mode == SubtitleMode.Hybrid)
-            return UseNativeBingBongAPI.Value && UseNativeSubtitleWithCustomAudio.Value;
-        return false;
-    }
-
-    /// <summary>True when Harmony text-setter subtitle patching should run for the current test mode.</summary>
-    /// <returns>bool</returns>
-    internal static bool ShouldUsePatchedSubtitles()
-    {
-        SubtitleMode mode = GetSubtitleMode();
-        if (mode == SubtitleMode.PatchedOnly)
-            return true;
-        if (mode == SubtitleMode.SingleNativeTimedOverlay)
-            return true;
-        if (mode == SubtitleMode.Hybrid)
-            return !ShouldUseNativeSubtitles();
-        return false;
-    }
-
-    /// <summary>True when overlay-only subtitle rendering should be forced for both single and timed lines.</summary>
-    /// <returns>bool</returns>
-    internal static bool ShouldForceOverlaySubtitles()
-    {
-        SubtitleMode mode = GetSubtitleMode();
-        if (mode == SubtitleMode.OverlayOnly)
-            return true;
-        return false;
-    }
-
-    /// <summary>True when the importer menu window is visible.</summary>
+    /// True when the importer menu window is visible.
     internal static bool MenuVisible = false;
 
-    /// <summary>Importer status text displayed in the menu window.</summary>
+    /// Importer status text displayed in the menu window.
     internal static string ImportStatus = "idle";
 
     public static string SoundsFolder { get; private set; } = null!;
@@ -222,7 +141,7 @@ public class Plugin : BaseUnityPlugin
         internal string Text = string.Empty;
     }
 
-    /// <summary>BepInEx entry point; binds config, applies patches, mounts the debug overlay, and starts audio loading.</summary>
+    /// BepInEx entry point; binds config, applies patches, mounts the debug overlay, and starts audio loading.
     /// <returns>void</returns>
     private void Awake()
     {
@@ -247,7 +166,7 @@ public class Plugin : BaseUnityPlugin
             "When true, plays through enabled clips back to back like a music player. Overrides AutoPlay.");
         MaxSyncFileSizeKb = Config.Bind("Network", "MaxSyncFileSizeKb", 5120,
             "Skip syncing/serving any sound file larger than this in kilobytes. Keeps multiplayer transfer fast.");
-        TimedSubtitlesEnabled = Config.Bind("Subtitles", "TimedSubtitlesEnabled", true,
+        TimedSubtitlesEnabled = Config.Bind("Subtitles", "TimedSubtitlesEnabled", false,
             "When true, clips with a timedSubtitles track display sing-along lines while holding Bing Bong. When false, only the single subtitle line is used.");
         FetchTimedSubtitlesOnImport = Config.Bind("Subtitles", "FetchTimedSubtitlesOnImport", true,
             "When true, the importer also runs yt-dlp to fetch a timed caption track for the clip. When false, only a placeholder single-line subtitle JSON is written.");
@@ -257,8 +176,8 @@ public class Plugin : BaseUnityPlugin
             "When true, route playback and subtitles through PEAK's native Bing Bong response system (rewriting Action_AskBingBong.responses and writing into LocalizedText.mainTable, mirroring the BingBongVoiceLineAPI technique). When false, fall back to the legacy AudioSource hijack and text-setter Harmony patches.");
         UseNativeSubtitleWithCustomAudio = Config.Bind("Subtitles", "UseNativeSubtitleWithCustomAudio", false,
             "When true, custom clip subtitles are also pushed into PEAK's native subtitle table. When false, native subtitle text is suppressed for custom audio.");
-        SubtitleTestMode = Config.Bind("Subtitles", "SubtitleTestMode", "SingleNativeTimedOverlay",
-            "Universal subtitle routing mode for testing. Options: Hybrid, NativeOnly, PatchedOnly, OverlayOnly, SingleNativeTimedOverlay.");
+        AllowClientImports = Config.Bind("Network", "AllowClientImports", false,
+            "When true, any connected client can upload new sound files through the mod's HTTP sync server.");
         RefreshKey = Config.Bind("Menu", "RefreshKey", KeyCode.F5,
             "While holding Bing Bong (or ForceEnableRefresh = true), press this key to reload custom sounds.");
         MenuToggleKey = Config.Bind("Menu", "MenuToggleKey", KeyCode.F6,
@@ -278,9 +197,10 @@ public class Plugin : BaseUnityPlugin
 
         _harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         _harmony.PatchAll();
-        if (ShouldUseNativeSubtitleInfrastructure())
+        if (UseNativeBingBongAPI.Value)
             NativeBingBongBridge.TryResolve();
         SubtitleTextOverridePatches.Apply(_harmony);
+        NetworkSyncPatches.TryApply(_harmony);
 
         PluginAudioSource = gameObject.AddComponent<AudioSource>();
         PluginAudioSource.playOnAwake = false;
@@ -297,7 +217,7 @@ public class Plugin : BaseUnityPlugin
         Log.LogInfo($"Sounds folder: {SoundsFolder}");
     }
 
-    /// <summary>Polls for the refresh key and triggers a reload when the player is holding Bing Bong or ForceEnableRefresh is set.</summary>
+    /// Polls for the refresh key and triggers a reload when the player is holding Bing Bong or ForceEnableRefresh is set.
     /// <returns>void</returns>
     private void Update()
     {
@@ -305,10 +225,9 @@ public class Plugin : BaseUnityPlugin
 
         UpdateFollowTransform();
         UpdateTimedSubtitleState();
-        if (ShouldUseNativeSubtitleInfrastructure())
+        if (UseNativeBingBongAPI.Value)
             TickNativeTimedSubtitle();
-        if (ShouldUsePatchedSubtitles())
-            SubtitleTextOverridePatches.TickForceActiveSubtitle();
+        SubtitleTextOverridePatches.TickForceActiveSubtitle();
         TickMirrorOnDrop();
 
         bool canRefresh = IsHoldingBingBong || ForceEnableRefresh.Value;
@@ -316,7 +235,7 @@ public class Plugin : BaseUnityPlugin
             StartRefresh();
     }
 
-    /// <summary>Unpatches Harmony and stops the sound sync server when the plugin unloads.</summary>
+    /// Unpatches Harmony and stops the sound sync server when the plugin unloads.
     /// <returns>void</returns>
     private void OnDestroy()
     {
@@ -326,7 +245,7 @@ public class Plugin : BaseUnityPlugin
         BingBongNetworkSync.StopServer();
     }
 
-    /// <summary>Ensures every plugin-managed audio source is silenced when the application is quitting.</summary>
+    /// Ensures every plugin-managed audio source is silenced when the application is quitting.
     /// <returns>void</returns>
     private void OnApplicationQuit()
     {
@@ -334,7 +253,7 @@ public class Plugin : BaseUnityPlugin
         BingBongNetworkSync.StopServer();
     }
 
-    /// <summary>Stops the plugin's audio source and every managed/intercepted Bing Bong source so playback ceases cleanly on quit.</summary>
+    /// Stops the plugin's audio source and every managed/intercepted Bing Bong source so playback ceases cleanly on quit.
     /// <returns>void</returns>
     private static void StopAllPlayback()
     {
@@ -373,7 +292,7 @@ public class Plugin : BaseUnityPlugin
         ActiveTimedSubtitleClip = null;
     }
 
-    /// <summary>Sets menu visibility, applies cursor controls, and toggles native Escape-style game pause.</summary>
+    /// Sets menu visibility, applies cursor controls, and toggles native Escape-style game pause.
     /// <param name="visible">True to open menu; false to close and restore prior input state.</param>
     /// <returns>void</returns>
     internal static void SetMenuVisible(bool visible)
@@ -408,7 +327,7 @@ public class Plugin : BaseUnityPlugin
         SyncEscapePauseForMenu(false);
     }
 
-    /// <summary>Mirrors menu open/close to the game's native pause toggle by simulating Escape key presses.</summary>
+    /// Mirrors menu open/close to the game's native pause toggle by simulating Escape key presses.
     /// <param name="menuOpen">True when opening menu, false when closing.</param>
     /// <returns>void</returns>
     private static void SyncEscapePauseForMenu(bool menuOpen)
@@ -429,7 +348,7 @@ public class Plugin : BaseUnityPlugin
         _menuPauseInjected = false;
     }
 
-    /// <summary>Sends an Escape key down/up pulse to trigger the same pause behavior as pressing Escape manually.</summary>
+    /// Sends an Escape key down/up pulse to trigger the same pause behavior as pressing Escape manually.
     /// <returns>void</returns>
     private static void PulseEscapeKey()
     {
@@ -444,7 +363,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Called by the game session start hook; loads sounds when SessionLoadOnly is enabled.</summary>
+    /// Called by the game session start hook; loads sounds when SessionLoadOnly is enabled.
     /// <returns>void</returns>
     internal static void OnSessionStart()
     {
@@ -453,7 +372,7 @@ public class Plugin : BaseUnityPlugin
         Log.LogInfo("Session started - loading sounds.");
     }
 
-    /// <summary>Starts a sound refresh cycle if one is not already running.</summary>
+    /// Starts a sound refresh cycle if one is not already running.
     /// <returns>void</returns>
     internal void StartRefresh()
     {
@@ -480,7 +399,7 @@ public class Plugin : BaseUnityPlugin
         _refreshPending = false;
     }
 
-    /// <summary>Queues a URL import and triggers refresh after a successful download.</summary>
+    /// Queues a URL import and triggers refresh after a successful download.
     /// <param name="url">Direct audio URL to download into the sounds folder.</param>
     /// <returns>void</returns>
     internal void StartImportFromUrl(string url)
@@ -488,15 +407,14 @@ public class Plugin : BaseUnityPlugin
         StartCoroutine(ImportFromUrlCoroutine(url));
     }
 
-    /// <summary>Sets the active subtitle using subtitle JSON override if one exists for the clip.</summary>
+    /// Sets the active subtitle using subtitle JSON override if one exists for the clip.
     /// <param name="clip">Clip that was selected for playback.</param>
     /// <returns>void</returns>
     internal static void OnClipPlayed(AudioClip clip)
     {
         DebugLastPlayed = clip.name;
 
-        if (ShouldUsePatchedSubtitles())
-            Patches.SubtitleTextOverridePatches.BeginDiscoveryWindow(2.0f);
+        Patches.SubtitleTextOverridePatches.BeginDiscoveryWindow(2.0f);
 
         string savedSubtitle;
         bool hasSaved = SubtitleOverrides.TryGetValue(clip.name, out savedSubtitle) && !string.IsNullOrWhiteSpace(savedSubtitle);
@@ -532,30 +450,25 @@ public class Plugin : BaseUnityPlugin
         WriteNativeSubtitleForClip(clip, ActiveSubtitle);
     }
 
-    /// <summary>Pushes the given text into PEAK's LocalizedText.mainTable for the subtitle id assigned to this clip by the native bridge.</summary>
+    /// Pushes the given text into PEAK's LocalizedText.mainTable for the subtitle id assigned to this clip by the native bridge.
     /// <param name="clip">Clip whose assigned subtitle id receives the text.</param>
     /// <param name="text">Subtitle text to display in the native UI.</param>
     /// <returns>void</returns>
     private static void WriteNativeSubtitleForClip(AudioClip clip, string text)
     {
-        if (!ShouldUseNativeSubtitles() || clip == null) return;
+        if (!UseNativeBingBongAPI.Value || clip == null) return;
         string id = NativeBingBongBridge.GetAssignedSubtitleId(clip);
-        if (string.IsNullOrEmpty(id))
-        {
-            NativeBingBongBridge.RewriteAllInScene();
-            id = NativeBingBongBridge.GetAssignedSubtitleId(clip);
-        }
         if (string.IsNullOrEmpty(id)) return;
         NativeBingBongBridge.WriteSubtitle(id, text ?? string.Empty);
     }
 
-    /// <summary>Tracks the most recent Bing Bong AudioSource that started playing one of our clips so we can resume on the plugin source if the player drops Bing Bong mid-line.</summary>
+    /// Tracks the most recent Bing Bong AudioSource that started playing one of our clips so we can resume on the plugin source if the player drops Bing Bong mid-line.
     private static AudioSource? _mirrorBbSource = null;
     private static AudioClip? _mirrorClip = null;
     private static float _mirrorStart = 0f;
     private static bool _wasHoldingBb = false;
 
-    /// <summary>Watches for a Bing Bong drop while one of our clips is mid-playback and continues that clip on the plugin's detached AudioSource.</summary>
+    /// Watches for a Bing Bong drop while one of our clips is mid-playback and continues that clip on the plugin's detached AudioSource.
     /// <returns>void</returns>
     private static void TickMirrorOnDrop()
     {
@@ -601,7 +514,7 @@ public class Plugin : BaseUnityPlugin
         _wasHoldingBb = IsHoldingBingBong;
     }
 
-    /// <summary>Finds the first Bing Bong AudioSource currently playing one of our loaded clips. Used to seed the mirror-on-drop tracker.</summary>
+    /// Finds the first Bing Bong AudioSource currently playing one of our loaded clips. Used to seed the mirror-on-drop tracker.
     /// <returns>AudioSource or null when none match.</returns>
     private static AudioSource? FindActiveBingBongSourcePlayingOurClip()
     {
@@ -620,7 +533,7 @@ public class Plugin : BaseUnityPlugin
         return null;
     }
 
-    /// <summary>Applies the configured spatial settings to a Bing Bong AudioSource at intercept time. The mod uses 2D audio (no panning) and computes distance attenuation manually.</summary>
+    /// Applies the configured spatial settings to a Bing Bong AudioSource at intercept time. The mod uses 2D audio (no panning) and computes distance attenuation manually.
     /// <param name="source">The AudioSource that was intercepted.</param>
     /// <returns>void</returns>
     internal static void ApplySpatialSettings(AudioSource source)
@@ -628,7 +541,7 @@ public class Plugin : BaseUnityPlugin
         source.spatialBlend = 0f;
     }
 
-    /// <summary>Returns the list of currently enabled clips, falling back to all loaded clips when none are enabled.</summary>
+    /// Returns the list of currently enabled clips, falling back to all loaded clips when none are enabled.
     /// <returns>List of clips eligible for random selection.</returns>
     internal static List<AudioClip> GetActiveClips()
     {
@@ -645,7 +558,7 @@ public class Plugin : BaseUnityPlugin
         return active;
     }
 
-    /// <summary>Persists the EnabledClips dictionary to selection.json in the sounds folder.</summary>
+    /// Persists the EnabledClips dictionary to selection.json in the sounds folder.
     /// <returns>void</returns>
     internal static void SaveSelection()
     {
@@ -673,7 +586,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Loads selection.json into the EnabledClips dictionary.</summary>
+    /// Loads selection.json into the EnabledClips dictionary.
     /// <returns>void</returns>
     internal static void LoadSelection()
     {
@@ -697,7 +610,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Plays a clip through the plugin's own AudioSource and fires subtitle hooks.</summary>
+    /// Plays a clip through the plugin's own AudioSource and fires subtitle hooks.
     /// <param name="clip">Clip to play.</param>
     /// <returns>void</returns>
     internal static void PlayThroughPluginSource(AudioClip clip)
@@ -721,7 +634,7 @@ public class Plugin : BaseUnityPlugin
         OnClipPlayed(clip);
     }
 
-    /// <summary>Plays a clip through the plugin's own AudioSource at the position of the given source. Used to detach intercepted Bing Bong playback so it survives the player dropping Bing Bong.</summary>
+    /// Plays a clip through the plugin's own AudioSource at the position of the given source. Used to detach intercepted Bing Bong playback so it survives the player dropping Bing Bong.
     /// <param name="clip">Clip to play.</param>
     /// <param name="originSource">The intercepted Bing Bong AudioSource whose transform is followed during playback.</param>
     /// <returns>void</returns>
@@ -746,7 +659,7 @@ public class Plugin : BaseUnityPlugin
         OnClipPlayed(clip);
     }
 
-    /// <summary>Per-frame update that applies manual 2D distance attenuation based on the listener's distance to the followed Bing Bong transform.</summary>
+    /// Per-frame update that applies manual 2D distance attenuation based on the listener's distance to the followed Bing Bong transform.
     /// <returns>void</returns>
     private static void UpdateFollowTransform()
     {
@@ -783,7 +696,7 @@ public class Plugin : BaseUnityPlugin
         PluginAudioSource.volume = baseVolume * attenuation;
     }
 
-    /// <summary>Finds the active audio listener transform (main camera or AudioListener component) for distance computations.</summary>
+    /// Finds the active audio listener transform (main camera or AudioListener component) for distance computations.
     /// <returns>Transform of the listener, or null if none found.</returns>
     private static UnityEngine.Transform? FindListenerTransform()
     {
@@ -794,7 +707,7 @@ public class Plugin : BaseUnityPlugin
         return null;
     }
 
-    /// <summary>Registers an AudioSource that should respond to global stop actions.</summary>
+    /// Registers an AudioSource that should respond to global stop actions.
     /// <param name="source">AudioSource to track for stop controls.</param>
     /// <returns>void</returns>
     internal static void RegisterManagedSource(AudioSource source)
@@ -806,7 +719,7 @@ public class Plugin : BaseUnityPlugin
         ManagedSources.Add(source);
     }
 
-    /// <summary>Stops all tracked override playback sources, including plugin preview/music and intercepted Bing Bong sources.</summary>
+    /// Stops all tracked override playback sources, including plugin preview/music and intercepted Bing Bong sources.
     /// <returns>void</returns>
     internal static void StopAllManagedAudio()
     {
@@ -834,11 +747,24 @@ public class Plugin : BaseUnityPlugin
             catch (Exception) { }
         }
 
-        ActiveSubtitle = string.Empty;
-        ActiveSubtitleUntil = 0f;
+        ClearTimedSubtitles();
+        BingBongNetworkSync.BroadcastStop();
     }
 
-    /// <summary>Coroutine that periodically plays a random enabled clip when AutoPlay is on and MusicMode is off.</summary>
+    /// Clears all active timed and single subtitle state. Safe to call from any context, including client-side stop signals.
+    /// <returns>void</returns>
+    internal static void ClearTimedSubtitles()
+    {
+        ActiveSubtitle = string.Empty;
+        ActiveSubtitleUntil = 0f;
+        ActiveTimedSubtitleClipName = string.Empty;
+        ActiveTimedSubtitleClip = null;
+        ActiveTimedSubtitleStart = 0f;
+        ActiveTimedSubtitleLastTick = 0f;
+        ActiveNativeSubtitle = string.Empty;
+    }
+
+    /// Coroutine that periodically plays a random enabled clip when AutoPlay is on and MusicMode is off.
     /// <returns>IEnumerator</returns>
     private IEnumerator AutoPlayLoop()
     {
@@ -858,7 +784,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Coroutine that plays clips back to back when MusicMode is enabled.</summary>
+    /// Coroutine that plays clips back to back when MusicMode is enabled.
     /// <returns>IEnumerator</returns>
     private IEnumerator MusicModeLoop()
     {
@@ -957,7 +883,7 @@ public class Plugin : BaseUnityPlugin
         {
             Log.LogInfo($"Override active: {CustomClips.Count} clip(s) ready.");
             Log.LogInfo($"Loaded {SubtitleOverrides.Count} subtitle override(s).");
-            if (ShouldUseNativeSubtitleInfrastructure())
+            if (UseNativeBingBongAPI.Value)
             {
                 int rewritten = NativeBingBongBridge.RewriteAllInScene();
                 if (rewritten > 0)
@@ -971,7 +897,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Reads a companion JSON file and returns subtitle text, or empty string if not present/invalid.</summary>
+    /// Reads a companion JSON file and returns subtitle text, or empty string if not present/invalid.
     /// <param name="audioPath">Absolute path to the audio file.</param>
     /// <returns>Subtitle text or empty string.</returns>
     private string TryReadSubtitleOverride(string audioPath)
@@ -994,7 +920,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Creates starter examples in the sounds folder and writes a short README.</summary>
+    /// Creates starter examples in the sounds folder and writes a short README.
     /// <returns>void</returns>
     private void EnsureExampleFiles()
     {
@@ -1031,7 +957,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Downloads an audio URL into the sounds folder and refreshes clips.</summary>
+    /// Downloads an audio URL into the sounds folder and refreshes clips.
     /// <param name="url">Audio URL entered from the importer menu.</param>
     /// <returns>IEnumerator</returns>
     private IEnumerator ImportFromUrlCoroutine(string url)
@@ -1097,7 +1023,7 @@ public class Plugin : BaseUnityPlugin
         yield return StartCoroutine(FinalizeImportedFile(finalName));
     }
 
-    /// <summary>Downloads audio from a YouTube or Twitch URL using yt-dlp, converts to mono OGG, and loads the clip.</summary>
+    /// Downloads audio from a YouTube or Twitch URL using yt-dlp, converts to mono OGG, and loads the clip.
     /// <param name="url">YouTube or Twitch URL to extract audio from.</param>
     /// <returns>IEnumerator</returns>
     private IEnumerator ImportFromYtDlpCoroutine(string url)
@@ -1212,7 +1138,7 @@ public class Plugin : BaseUnityPlugin
             ImportStatus = $"saved (no timed subs): {Path.GetFileName(finalPath)}";
     }
 
-    /// <summary>Runs subtitle extraction in a separate yt-dlp request after audio import completes.</summary>
+    /// Runs subtitle extraction in a separate yt-dlp request after audio import completes.
     /// <param name="url">Original media URL.</param>
     /// <param name="ytDlp">Resolved yt-dlp executable path.</param>
     /// <param name="timestamp">Import timestamp prefix used by the audio import.</param>
@@ -1269,7 +1195,7 @@ public class Plugin : BaseUnityPlugin
         ImportStatus = $"subtitle ready: {Path.GetFileName(finalAudioPath)}";
     }
 
-    /// <summary>Executes one yt-dlp subtitle pass and reports whether it produced any VTT files for the timestamp.</summary>
+    /// Executes one yt-dlp subtitle pass and reports whether it produced any VTT files for the timestamp.
     /// <param name="ytDlp">Resolved yt-dlp executable path.</param>
     /// <param name="url">Original media URL.</param>
     /// <param name="outputTemplate">yt-dlp output template path.</param>
@@ -1325,7 +1251,7 @@ public class Plugin : BaseUnityPlugin
         onDone(exitCode == 0 && foundAny, stderr);
     }
 
-    /// <summary>Marks a newly imported file for network sync and refreshes once all known clients have downloaded it.</summary>
+    /// Marks a newly imported file for network sync and refreshes once all known clients have downloaded it.
     /// <param name="fileName">Imported audio file name (including extension).</param>
     /// <returns>IEnumerator</returns>
     private IEnumerator FinalizeImportedFile(string fileName)
@@ -1333,6 +1259,15 @@ public class Plugin : BaseUnityPlugin
         string clipName = Path.GetFileNameWithoutExtension(fileName);
         PendingSyncClipNames.Add(clipName);
         BingBongNetworkSync.RegisterImportedFile(fileName);
+
+        if (!BingBongNetworkSync.IsHosting && !string.IsNullOrEmpty(BingBongNetworkSync.ActiveHostAddress)
+            && AllowClientImports.Value)
+        {
+            string jsonName = Path.ChangeExtension(fileName, ".json");
+            yield return StartCoroutine(BingBongNetworkSync.UploadFileToHost(fileName, BingBongNetworkSync.ActiveHostAddress));
+            if (File.Exists(Path.Combine(SoundsFolder, jsonName)))
+                yield return StartCoroutine(BingBongNetworkSync.UploadFileToHost(jsonName, BingBongNetworkSync.ActiveHostAddress));
+        }
 
         while (!BingBongNetworkSync.IsImportedFileSynced(fileName))
         {
@@ -1346,7 +1281,7 @@ public class Plugin : BaseUnityPlugin
         StartRefresh();
     }
 
-    /// <summary>Saves or clears the subtitle override JSON for a specific clip and updates in-memory mappings.</summary>
+    /// Saves or clears the subtitle override JSON for a specific clip and updates in-memory mappings.
     /// <param name="clipName">Clip name without extension.</param>
     /// <param name="subtitle">Subtitle text to persist. Empty clears the override.</param>
     /// <returns>void</returns>
@@ -1388,7 +1323,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Removes the timed subtitle track for a clip from memory and rewrites its JSON to keep only the single subtitle line.</summary>
+    /// Removes the timed subtitle track for a clip from memory and rewrites its JSON to keep only the single subtitle line.
     /// <param name="clipName">Clip name without extension.</param>
     /// <returns>void</returns>
     internal static void RemoveTimedSubtitleForClip(string clipName)
@@ -1412,7 +1347,7 @@ public class Plugin : BaseUnityPlugin
         SaveSubtitleOverrideForClip(clipName, existing);
     }
 
-    /// <summary>Resolves the audio extension from payload signature, response headers, and URL as fallback.</summary>
+    /// Resolves the audio extension from payload signature, response headers, and URL as fallback.
     /// <param name="request">Completed UnityWebRequest with response headers.</param>
     /// <param name="uri">Parsed source URL.</param>
     /// <param name="data">Downloaded bytes.</param>
@@ -1441,7 +1376,7 @@ public class Plugin : BaseUnityPlugin
         return string.Empty;
     }
 
-    /// <summary>Detects container type directly from downloaded bytes.</summary>
+    /// Detects container type directly from downloaded bytes.
     /// <param name="data">Downloaded file bytes.</param>
     /// <returns>Detected extension (.ogg/.wav) or empty when unknown.</returns>
     private string DetectExtensionFromSignature(byte[] data)
@@ -1456,7 +1391,7 @@ public class Plugin : BaseUnityPlugin
         return string.Empty;
     }
 
-    /// <summary>Builds a best-effort base name using response filename metadata, query params, then URL path.</summary>
+    /// Builds a best-effort base name using response filename metadata, query params, then URL path.
     /// <param name="request">Completed UnityWebRequest with response headers.</param>
     /// <param name="uri">Parsed source URL.</param>
     /// <returns>Raw base file name before normalization.</returns>
@@ -1481,7 +1416,7 @@ public class Plugin : BaseUnityPlugin
         return "imported_sound";
     }
 
-    /// <summary>Normalizes a raw title into a stable filename-safe base.</summary>
+    /// Normalizes a raw title into a stable filename-safe base.
     /// <param name="name">Raw title/name string.</param>
     /// <returns>Filename-safe lowercase base name.</returns>
     private string NormalizeFileName(string name)
@@ -1498,7 +1433,7 @@ public class Plugin : BaseUnityPlugin
         return value.ToLowerInvariant();
     }
 
-    /// <summary>Extracts a filename from Content-Disposition when present.</summary>
+    /// Extracts a filename from Content-Disposition when present.
     /// <param name="header">Raw Content-Disposition header value.</param>
     /// <returns>Filename text or empty string.</returns>
     private string TryGetFileNameFromContentDisposition(string header)
@@ -1517,7 +1452,7 @@ public class Plugin : BaseUnityPlugin
         return string.Empty;
     }
 
-    /// <summary>Returns true when the URL is a YouTube or Twitch link that requires yt-dlp.</summary>
+    /// Returns true when the URL is a YouTube or Twitch link that requires yt-dlp.
     /// <param name="url">URL to inspect.</param>
     /// <returns>bool</returns>
     private static bool IsYtDlpUrl(string url)
@@ -1528,7 +1463,7 @@ public class Plugin : BaseUnityPlugin
             || url.IndexOf("clips.twitch.tv", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
-    /// <summary>Finds the yt-dlp executable by checking PATH, the plugin folder, and common install locations.</summary>
+    /// Finds the yt-dlp executable by checking PATH, the plugin folder, and common install locations.
     /// <returns>Full path to yt-dlp or empty string when not found.</returns>
     private static string FindYtDlp()
     {
@@ -1567,7 +1502,7 @@ public class Plugin : BaseUnityPlugin
         return string.Empty;
     }
 
-    /// <summary>Updates ActiveSubtitle each frame using the active timed subtitle track, if any.</summary>
+    /// Updates ActiveSubtitle each frame using the active timed subtitle track, if any.
     /// <returns>void</returns>
     private static void UpdateTimedSubtitleState()
     {
@@ -1647,7 +1582,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Continuously writes the active timed subtitle line into LocalizedText.MAIN_TABLE so the native UI stays current as lines change.</summary>
+    /// Continuously writes the active timed subtitle line into LocalizedText.MAIN_TABLE so the native UI stays current as lines change.
     /// <returns>void</returns>
     private static void TickNativeTimedSubtitle()
     {
@@ -1658,7 +1593,7 @@ public class Plugin : BaseUnityPlugin
         NativeBingBongBridge.WriteSubtitle(id, ActiveSubtitle ?? string.Empty);
     }
 
-    /// <summary>Reads timed subtitle entries from clip JSON using timedSubtitles/timed_subtitles array format.</summary>
+    /// Reads timed subtitle entries from clip JSON using timedSubtitles/timed_subtitles array format.
     /// <param name="audioPath">Absolute path to the audio file.</param>
     /// <returns>Parsed timed lines sorted by start time.</returns>
     private List<TimedSubtitleLine> TryReadTimedSubtitleOverrides(string audioPath)
@@ -1708,7 +1643,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Builds a timed subtitle JSON companion from downloaded VTT files, if present.</summary>
+    /// Builds a timed subtitle JSON companion from downloaded VTT files, if present.
     /// <param name="timestamp">Import timestamp prefix used for temporary output names.</param>
     /// <param name="finalAudioPath">Final saved audio path.</param>
     /// <param name="subtitleJsonPath">JSON output path to write.</param>
@@ -1766,7 +1701,7 @@ public class Plugin : BaseUnityPlugin
         return true;
     }
 
-    /// <summary>Parses a .vtt subtitle file into timed line entries.</summary>
+    /// Parses a .vtt subtitle file into timed line entries.
     /// <param name="vttPath">Absolute path to .vtt file.</param>
     /// <returns>List of timed subtitle lines.</returns>
     private List<TimedSubtitleLine> ParseVttTimedSubtitles(string vttPath)
@@ -1816,7 +1751,7 @@ public class Plugin : BaseUnityPlugin
         return lines;
     }
 
-    /// <summary>Returns true when the VTT file looks like a YouTube auto-generated caption (so the parser knows to dedupe rolling cues).</summary>
+    /// Returns true when the VTT file looks like a YouTube auto-generated caption (so the parser knows to dedupe rolling cues).
     /// <param name="vttPath">Absolute path to the VTT file.</param>
     /// <returns>bool</returns>
     private static bool LooksLikeAutoSubFile(string vttPath)
@@ -1843,7 +1778,7 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    /// <summary>Collapses YouTube auto-caption rolling cues where each line is a prefix-extension of the next, leaving only completed phrases.</summary>
+    /// Collapses YouTube auto-caption rolling cues where each line is a prefix-extension of the next, leaving only completed phrases.
     /// <param name="lines">Raw cue list from the parser.</param>
     /// <returns>Deduped cue list.</returns>
     private static List<TimedSubtitleLine> DedupeRollingCues(List<TimedSubtitleLine> lines)
@@ -1890,7 +1825,7 @@ public class Plugin : BaseUnityPlugin
         return result;
     }
 
-    /// <summary>Normalizes cue text for prefix/dedupe comparison by collapsing whitespace and lowercasing.</summary>
+    /// Normalizes cue text for prefix/dedupe comparison by collapsing whitespace and lowercasing.
     /// <param name="text">Raw cue text.</param>
     /// <returns>Normalized comparison key.</returns>
     private static string NormalizeCueText(string text)
@@ -1900,7 +1835,7 @@ public class Plugin : BaseUnityPlugin
         return Regex.Replace(text, "\\s+", " ").Trim();
     }
 
-    /// <summary>Parses a VTT timestamp into seconds.</summary>
+    /// Parses a VTT timestamp into seconds.
     /// <param name="value">Raw VTT time segment.</param>
     /// <returns>Time in seconds, or -1 when invalid.</returns>
     private float ParseVttTime(string value)
@@ -1942,7 +1877,7 @@ public class Plugin : BaseUnityPlugin
         return h * 3600f + m * 60f + s;
     }
 
-    /// <summary>Escapes a string for JSON output.</summary>
+    /// Escapes a string for JSON output.
     /// <param name="value">Input string to escape.</param>
     /// <returns>JSON-safe escaped string.</returns>
     private string EscapeJson(string value)
@@ -1950,7 +1885,7 @@ public class Plugin : BaseUnityPlugin
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
 
-    /// <summary>Finds the best candidate transform for Bing Bong so local music/preview playback follows object location.</summary>
+    /// Finds the best candidate transform for Bing Bong so local music/preview playback follows object location.
     /// <returns>Bing Bong transform when found; otherwise null.</returns>
     private static UnityEngine.Transform? FindBingBongTransform()
     {

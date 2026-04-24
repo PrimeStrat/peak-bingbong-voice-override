@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace BingBongVoiceOverride.Patches;
 
-/// <summary>Reflection-only bridge to PEAK's native Bing Bong response and subtitle systems. Mirrors the technique used by BingBongVoiceLineAPI: write into LocalizedText.mainTable and rewrite Action_AskBingBong.responses so PEAK plays our clips with native UI.</summary>
+/// Reflection-only bridge to PEAK's native Bing Bong response and subtitle systems. Mirrors the technique used by BingBongVoiceLineAPI: write into LocalizedText.mainTable and rewrite Action_AskBingBong.responses so PEAK plays our clips with native UI.
 internal static class NativeBingBongBridge
 {
     internal const string OverrideSubtitleId = "BBVO_OVERRIDE_SUBTITLE";
@@ -32,7 +32,7 @@ internal static class NativeBingBongBridge
 
     private static readonly Dictionary<int, string> AssignedIdByClip = new Dictionary<int, string>();
 
-    /// <summary>Resolves all reflection handles once and caches success state. Safe to call repeatedly.</summary>
+    /// Resolves all reflection handles once and caches success state. Safe to call repeatedly.
     /// <returns>True when every required type and member is resolved.</returns>
     internal static bool TryResolve()
     {
@@ -44,36 +44,24 @@ internal static class NativeBingBongBridge
             _localizedTextType = AccessTools.TypeByName("LocalizedText");
             if (_localizedTextType == null) return False("LocalizedText type missing");
 
-            FieldInfo[] allFields = _localizedTextType.GetFields(
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
-            Plugin.Log.LogInfo("[NativeBingBongBridge] LocalizedText fields: "
-                + string.Join(", ", System.Array.ConvertAll(allFields, f => f.Name + ":" + f.FieldType.Name)));
-
-            string[] tableNames = { "MAIN_TABLE", "mainTable", "table", "translationTable", "translations",
-                "localizationTable", "_mainTable", "_table", "entries" };
-            for (int i = 0; i < tableNames.Length && _mainTableField == null; i++)
-                _mainTableField = AccessTools.Field(_localizedTextType, tableNames[i]);
+            _mainTableField = AccessTools.Field(_localizedTextType, "mainTable");
             if (_mainTableField == null)
             {
+                FieldInfo[] allFields = _localizedTextType.GetFields(
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
                 for (int i = 0; i < allFields.Length && _mainTableField == null; i++)
                 {
                     FieldInfo f = allFields[i];
                     if (!f.FieldType.IsGenericType) continue;
                     if (f.FieldType.GetGenericTypeDefinition() != typeof(Dictionary<,>)) continue;
                     if (f.FieldType.GetGenericArguments()[0] == typeof(string))
-                    {
                         _mainTableField = f;
-                        Plugin.Log.LogInfo("[NativeBingBongBridge] mainTable resolved via scan: " + f.Name);
-                    }
                 }
             }
-
-            string[] countNames = { "LANGUAGE_COUNT", "languageCount", "LanguageCount", "numLanguages", "NUM_LANGUAGES" };
-            for (int i = 0; i < countNames.Length && _languageCountField == null; i++)
-                _languageCountField = AccessTools.Field(_localizedTextType, countNames[i]);
-
-            _tryInitTablesMethod = AccessTools.Method(_localizedTextType, "TryInitTables");
             if (_mainTableField == null) return False("LocalizedText table field not found");
+
+            _languageCountField = AccessTools.Field(_localizedTextType, "languageCount");
+            _tryInitTablesMethod = AccessTools.Method(_localizedTextType, "TryInitTables");
 
             _askBingBongType = AccessTools.TypeByName("Action_AskBingBong");
             if (_askBingBongType == null) return False("Action_AskBingBong type missing");
@@ -104,7 +92,7 @@ internal static class NativeBingBongBridge
         }
     }
 
-    /// <summary>Writes the given text into LocalizedText.mainTable[id] across every language slot so the native UI displays it on the next lookup.</summary>
+    /// Writes the given text into LocalizedText.mainTable[id] across every language slot so the native UI displays it on the next lookup.
     /// <param name="id">Subtitle id used by a BingBongResponse (uppercased before storage).</param>
     /// <param name="text">Text to display.</param>
     /// <returns>True when the table was updated.</returns>
@@ -140,7 +128,7 @@ internal static class NativeBingBongBridge
         }
     }
 
-    /// <summary>Replaces the responses array on the given Action_AskBingBong instance with one entry per loaded plugin clip, each mapped to our control subtitle id so a follow-up WriteSubtitle drives the native UI.</summary>
+    /// Replaces the responses array on the given Action_AskBingBong instance with one entry per loaded plugin clip, each mapped to our control subtitle id so a follow-up WriteSubtitle drives the native UI.
     /// <param name="askInstance">An Action_AskBingBong instance discovered in the scene.</param>
     /// <returns>True when the responses array was rewritten.</returns>
     internal static bool RewriteResponses(object askInstance)
@@ -180,7 +168,7 @@ internal static class NativeBingBongBridge
         }
     }
 
-    /// <summary>Returns the subtitle id assigned to the given clip during the most recent RewriteResponses pass, or empty when not assigned.</summary>
+    /// Returns the subtitle id assigned to the given clip during the most recent RewriteResponses pass, or empty when not assigned.
     /// <param name="clip">Clip whose subtitle id to look up.</param>
     /// <returns>Assigned id or empty string.</returns>
     internal static string GetAssignedSubtitleId(AudioClip clip)
@@ -190,7 +178,7 @@ internal static class NativeBingBongBridge
         return id ?? string.Empty;
     }
 
-    /// <summary>Scans every loaded Action_AskBingBong instance and rewrites its responses array. Useful after clip reloads.</summary>
+    /// Scans every loaded Action_AskBingBong instance and rewrites its responses array. Useful after clip reloads.
     /// <returns>Number of instances rewritten.</returns>
     internal static int RewriteAllInScene()
     {
