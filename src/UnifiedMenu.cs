@@ -13,7 +13,10 @@ internal class UnifiedMenu : MonoBehaviour
     private int _activeTab = 0;
     private readonly string[] _tabLabels = ["Status", "Sounds", "Playback", "Network", "Importer"];
     private readonly Dictionary<string, string> _subtitleDrafts = new(StringComparer.OrdinalIgnoreCase);
-    private string _manualHostIp = string.Empty;
+
+    private Vector2 _playbackScroll = Vector2.zero;
+    private int _playerQueueIndex = 0;
+    private bool _playbackSettingsExpanded = false;
     private GUIStyle? _overlayStyle;
     private Font? _overlayStyleFont;
     private int _overlayStyleFontSize;
@@ -169,16 +172,51 @@ internal class UnifiedMenu : MonoBehaviour
     // Draws the Status tab. returns: void
     private void DrawStatusTab()
     {
+        GUI.color = new Color(0.7f, 1f, 1f);
+        GUILayout.Label($"Tip: While in-game, pause (Escape) then press [{Plugin.MenuToggleKey.Value}] to open this menu.");
+        GUI.color = Color.white;
+        GUILayout.Space(4f);
+
+        if (BingBongNetworkSync.IsConnectedAsClient)
+        {
+            GUI.color = new Color(1f, 1f, 0.5f);
+            GUILayout.Label("Connected as client -- sound selection and sync settings are controlled by the host.");
+            string conn = BingBongNetworkSync.HasReachedHost
+                ? "Host link: connected (Photon)"
+                : (BingBongNetworkSync.ClientSyncFailed
+                    ? "Host link: no reply from host (host may not have the mod, or sync is still loading)"
+                    : "Host link: waiting for first reply over Photon...");
+            GUI.color = BingBongNetworkSync.HasReachedHost ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 0.6f, 0.4f);
+            GUILayout.Label(conn);
+            GUI.color = Color.white;
+            GUILayout.Space(4f);
+        }
+
         GUILayout.Label($"Status:   {(Plugin.ClipsReady ? "ready" : "loading...")}");
         GUILayout.Label($"Loaded:   {Plugin.CustomClips.Count} clip(s)");
         GUILayout.Label($"Active:   {Plugin.GetActiveClips().Count} enabled");
         GUILayout.Label($"Last:     {Plugin.DebugLastPlayed}");
         GUILayout.Label($"Subtitle: {Plugin.ActiveSubtitle}");
 
+        if (BingBongNetworkSync.IsHosting)
+        {
+            List<string> unsynced = BingBongNetworkSync.GetUnsyncedPlayerNames();
+            if (unsynced.Count > 0)
+            {
+                GUILayout.Space(4f);
+                GUI.color = new Color(1f, 0.6f, 0.4f);
+                GUILayout.Label($"Clients not yet synced ({unsynced.Count}): sounds blocked until synced.");
+                foreach (string name in unsynced)
+                    GUILayout.Label($"  - {name}");
+                GUI.color = Color.white;
+            }
+        }
+
         GUILayout.Space(6f);
         bool canRefresh = Plugin.IsHoldingBingBong || Plugin.ForceEnableRefresh.Value;
-        GUI.enabled = canRefresh;
-        if (GUILayout.Button($"Refresh Sounds  [{Plugin.RefreshKey.Value}]"))
+        bool refreshBusy = Plugin.IsRefreshPending;
+        GUI.enabled = canRefresh && !refreshBusy;
+        if (GUILayout.Button(refreshBusy ? "Syncing..." : "Refresh Sounds"))
             Plugin.Instance.StartRefresh();
         GUI.enabled = true;
         if (!canRefresh)
@@ -188,11 +226,22 @@ internal class UnifiedMenu : MonoBehaviour
     // Draws the Sounds tab with per-clip enable checkboxes and a play-now button. returns: void
     private void DrawSoundsTab()
     {
+        bool isClient = BingBongNetworkSync.IsConnectedAsClient;
+        if (isClient)
+        {
+            GUI.color = new Color(1f, 1f, 0.5f);
+            GUILayout.Label("Connected as client -- selection is synced from the host. Changes here are local only.");
+            GUI.color = Color.white;
+            GUILayout.Space(4f);
+        }
+
         GUILayout.Label("Check the clips that should be in the random pool. Click 'Play' to force-pick one now.");
 
         GUILayout.BeginHorizontal();
+        GUI.enabled = !isClient;
         if (GUILayout.Button("Enable All")) SetAllEnabled(true);
         if (GUILayout.Button("Disable All")) SetAllEnabled(false);
+        GUI.enabled = true;
         if (GUILayout.Button("Stop Sound"))
             Plugin.StopAllManagedAudio();
         GUILayout.EndHorizontal();
@@ -277,53 +326,150 @@ internal class UnifiedMenu : MonoBehaviour
             Plugin.ForcedNextClipName = string.Empty;
     }
 
-    // Draws the Playback tab with volume, distance, autoplay, and music mode controls. returns: void
+    // Draws the Playback tab as a full music player with transport controls and a scrollable queue. returns: void
     private void DrawPlaybackTab()
     {
-        GUILayout.Label($"Volume Multiplier: {Plugin.VolumeMultiplier.Value:F2}x");
-        Plugin.VolumeMultiplier.Value = GUILayout.HorizontalSlider(Plugin.VolumeMultiplier.Value, 0f, 3f);
+        List<AudioClip> active = Plugin.GetActiveClips();
+        bool isPlaying = Plugin.PluginAudioSource != null && Plugin.PluginAudioSource.isPlaying;
+        bool isPaused = Plugin.PluginAudioSource != null
+            && !Plugin.PluginAudioSource.isPlaying
+            && Plugin.PluginAudioSource.clip != null
+            && Plugin.PluginAudioSource.time > 0f;
+        AudioClip? nowPlaying = (isPlaying || isPaused) ? Plugin.PluginAudioSource!.clip : null;
 
-        GUILayout.Space(8f);
-        bool globalDistance = !Plugin.ShortRangeOnly.Value;
-        bool newGlobalDistance = GUILayout.Toggle(globalDistance,
-            "  Global distance (hear anywhere, ignores object distance)");
-        Plugin.ShortRangeOnly.Value = !newGlobalDistance;
-        if (Plugin.ShortRangeOnly.Value)
+        int currentActiveIndex = -1;
+        if (nowPlaying != null)
         {
-            GUILayout.Label($"  Max distance: {Plugin.ShortRangeMaxDistance.Value:F0} m");
-            Plugin.ShortRangeMaxDistance.Value = GUILayout.HorizontalSlider(Plugin.ShortRangeMaxDistance.Value, 5f, 200f);
+            for (int i = 0; i < active.Count; i++)
+            {
+                if (active[i] == nowPlaying) { currentActiveIndex = i; break; }
+            }
         }
 
-        GUILayout.Space(8f);
-        Plugin.AutoPlayEnabled.Value = GUILayout.Toggle(Plugin.AutoPlayEnabled.Value,
-            "  Auto-play random clip on a timer (no interaction required)");
-        if (Plugin.AutoPlayEnabled.Value)
-        {
-            GUILayout.Label($"  Interval: {Plugin.AutoPlayIntervalSeconds.Value:F0} s");
-            Plugin.AutoPlayIntervalSeconds.Value = GUILayout.HorizontalSlider(Plugin.AutoPlayIntervalSeconds.Value, 5f, 300f);
-        }
+        if (active.Count > 0 && _playerQueueIndex >= active.Count)
+            _playerQueueIndex = 0;
 
-        GUILayout.Space(8f);
-        Plugin.MusicMode.Value = GUILayout.Toggle(Plugin.MusicMode.Value,
-            "  Music player mode (continuous back-to-back playback, overrides auto-play)");
+        GUILayout.Label(nowPlaying != null ? $"Now Playing:  {nowPlaying.name}" : "Now Playing:  (stopped)");
 
-        GUILayout.Space(8f);
-        Plugin.TimedSubtitlesEnabled.Value = GUILayout.Toggle(Plugin.TimedSubtitlesEnabled.Value,
-            "  Timed sing-along subtitles [experimental] (when off, only the single subtitle line is shown)");
-
-        GUILayout.Space(8f);
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Start Playback"))
+        float clipTime = (isPlaying || isPaused) ? Plugin.PluginAudioSource!.time : 0f;
+        float clipLen = nowPlaying != null ? Mathf.Max(0.01f, nowPlaying.length) : 1f;
+        GUILayout.Label(FormatTime(clipTime), GUILayout.Width(40f));
+        GUI.enabled = nowPlaying != null;
+        float newTime = GUILayout.HorizontalSlider(clipTime, 0f, clipLen);
+        if (GUI.enabled && Mathf.Abs(newTime - clipTime) > 0.05f)
+            Plugin.PluginAudioSource!.time = Mathf.Clamp(newTime, 0f, clipLen - 0.01f);
+        GUI.enabled = true;
+        GUILayout.Label(FormatTime(clipLen), GUILayout.Width(40f));
+        GUILayout.EndHorizontal();
+
+        GUILayout.Space(4f);
+
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("<< Prev", GUILayout.Width(80f)))
         {
-            List<AudioClip> active = Plugin.GetActiveClips();
             if (active.Count > 0)
-                Plugin.PlayThroughPluginSource(active[UnityEngine.Random.Range(0, active.Count)]);
+            {
+                int baseIdx = currentActiveIndex >= 0 ? currentActiveIndex : _playerQueueIndex;
+                _playerQueueIndex = (baseIdx - 1 + active.Count) % active.Count;
+                Plugin.PlayThroughPluginSource(active[_playerQueueIndex]);
+            }
         }
-        if (GUILayout.Button("Stop Playback"))
+        string midLabel = isPlaying ? "|| Pause" : (isPaused ? "> Resume" : "> Play");
+        if (GUILayout.Button(midLabel, GUILayout.Width(90f)))
         {
+            if (isPlaying)
+                Plugin.PausePlayback();
+            else if (isPaused)
+                Plugin.UnpausePlayback();
+            else if (active.Count > 0)
+                Plugin.PlayThroughPluginSource(active[_playerQueueIndex]);
+        }
+        if (GUILayout.Button("[] Stop", GUILayout.Width(70f)))
             Plugin.StopAllManagedAudio();
+        if (GUILayout.Button("Next >>", GUILayout.Width(80f)))
+        {
+            if (active.Count > 0)
+            {
+                int baseIdx = currentActiveIndex >= 0 ? currentActiveIndex : _playerQueueIndex;
+                _playerQueueIndex = (baseIdx + 1) % active.Count;
+                Plugin.PlayThroughPluginSource(active[_playerQueueIndex]);
+            }
         }
         GUILayout.EndHorizontal();
+
+        GUILayout.Space(4f);
+
+        GUILayout.BeginHorizontal();
+        Plugin.MusicMode.Value = GUILayout.Toggle(Plugin.MusicMode.Value, "  Music Mode", GUILayout.Width(120f));
+        GUILayout.Space(8f);
+        GUILayout.Label($"Vol: {Plugin.VolumeMultiplier.Value:F2}x", GUILayout.Width(72f));
+        Plugin.VolumeMultiplier.Value = GUILayout.HorizontalSlider(Plugin.VolumeMultiplier.Value, 0f, 3f);
+        GUILayout.EndHorizontal();
+
+        GUILayout.Space(6f);
+
+        GUILayout.Label($"Queue  --  {active.Count} playable clip(s):");
+        _playbackScroll = GUILayout.BeginScrollView(_playbackScroll, GUILayout.Height(200f));
+        for (int i = 0; i < active.Count; i++)
+        {
+            AudioClip clip = active[i];
+            bool isCurrent = clip == nowPlaying;
+            GUILayout.BeginHorizontal();
+            if (isCurrent)
+            {
+                GUI.color = isPlaying ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 1f, 0.5f);
+                GUILayout.Label(isPlaying ? ">" : "||", GUILayout.Width(16f));
+            }
+            else
+            {
+                GUILayout.Space(16f);
+            }
+            GUILayout.Label($"{i + 1}. {clip.name}  ({FormatTime(clip.length)})", GUILayout.ExpandWidth(true));
+            GUI.color = Color.white;
+            if (GUILayout.Button("Play", GUILayout.Width(50f)))
+            {
+                _playerQueueIndex = i;
+                Plugin.PlayThroughPluginSource(clip);
+            }
+            GUILayout.EndHorizontal();
+        }
+        GUILayout.EndScrollView();
+
+        GUILayout.Space(4f);
+
+        if (GUILayout.Button(_playbackSettingsExpanded ? "v Settings" : "> Settings", GUILayout.Width(100f)))
+            _playbackSettingsExpanded = !_playbackSettingsExpanded;
+
+        if (_playbackSettingsExpanded)
+        {
+            bool globalDistance = !Plugin.ShortRangeOnly.Value;
+            bool newGlobal = GUILayout.Toggle(globalDistance, "  Global distance (hear anywhere)");
+            Plugin.ShortRangeOnly.Value = !newGlobal;
+            if (Plugin.ShortRangeOnly.Value)
+            {
+                GUILayout.Label($"  Max distance: {Plugin.ShortRangeMaxDistance.Value:F0} m");
+                Plugin.ShortRangeMaxDistance.Value = GUILayout.HorizontalSlider(Plugin.ShortRangeMaxDistance.Value, 5f, 200f);
+            }
+            Plugin.AutoPlayEnabled.Value = GUILayout.Toggle(Plugin.AutoPlayEnabled.Value,
+                "  Auto-play random clip on a timer");
+            if (Plugin.AutoPlayEnabled.Value)
+            {
+                GUILayout.Label($"  Interval: {Plugin.AutoPlayIntervalSeconds.Value:F0} s");
+                Plugin.AutoPlayIntervalSeconds.Value = GUILayout.HorizontalSlider(Plugin.AutoPlayIntervalSeconds.Value, 5f, 300f);
+            }
+            Plugin.TimedSubtitlesEnabled.Value = GUILayout.Toggle(Plugin.TimedSubtitlesEnabled.Value,
+                "  Timed sing-along subtitles [experimental]");
+        }
+    }
+
+    // Formats a duration in seconds as M:SS.
+    // seconds (float): duration to format
+    // returns: string
+    private static string FormatTime(float seconds)
+    {
+        int s = Mathf.FloorToInt(Mathf.Max(0f, seconds));
+        return $"{s / 60}:{s % 60:D2}";
     }
 
     // Draws the Network tab with sync status and size guard. returns: void
@@ -341,13 +487,38 @@ internal class UnifiedMenu : MonoBehaviour
                 "  Allow any client to upload new sounds to this host");
 
             GUILayout.Space(4f);
-            List<(string ip, int count)> clientCounts = BingBongNetworkSync.GetClientDownloadCounts();
             int servedFiles = BingBongNetworkSync.GetServedAudioFileCount();
-            GUILayout.Label($"Known clients: {clientCounts.Count}  (serving {servedFiles} audio file(s))");
-            foreach ((string ip, int count) in clientCounts)
+            List<string> unsynced = BingBongNetworkSync.GetUnsyncedPlayerNames();
+            List<(string displayName, int count)> clientCounts = BingBongNetworkSync.GetClientDownloadCounts();
+            GUILayout.Label($"Serving {servedFiles} audio file(s) to {clientCounts.Count} known client(s)");
+
+            if (unsynced.Count > 0)
             {
-                string syncTag = servedFiles > 0 && count >= servedFiles ? " [synced]" : $" [{count}/{servedFiles} files]";
-                GUILayout.Label($"  {ip}{syncTag}");
+                GUI.color = new Color(1f, 0.6f, 0.4f);
+                GUILayout.Label($"Not yet synced ({unsynced.Count}):");
+                foreach (string name in unsynced)
+                {
+                    int got = BingBongNetworkSync.GetPlayerSyncedFileCount(name);
+                    string progress = servedFiles > 0 ? $" ({got}/{servedFiles} files)" : string.Empty;
+                    GUILayout.Label($"  - {name}{progress}");
+                }
+                GUI.color = Color.white;
+            }
+            else if (clientCounts.Count > 0)
+            {
+                GUI.color = new Color(0.5f, 1f, 0.5f);
+                GUILayout.Label("All lobby clients are synced.");
+                GUI.color = Color.white;
+            }
+
+            if (clientCounts.Count > 0)
+            {
+                GUILayout.Space(2f);
+                foreach ((string name, int count) in clientCounts)
+                {
+                    string syncTag = servedFiles > 0 && count >= servedFiles ? " [synced]" : $" [{count}/{servedFiles} files]";
+                    GUILayout.Label($"  {name}{syncTag}");
+                }
             }
 
             List<(string fileName, int pending)> pendingImports = BingBongNetworkSync.GetPendingImports();
@@ -365,25 +536,37 @@ internal class UnifiedMenu : MonoBehaviour
                 ? "Host allows client imports: YES"
                 : "Host allows client imports: NO (host must enable AllowClientImports)";
             GUILayout.Label(importLabel);
-            GUILayout.Label($"Host: {BingBongNetworkSync.ActiveHostAddress}  |  Local clips loaded: {Plugin.CustomClips.Count}");
+            GUILayout.Label($"Local clips loaded: {Plugin.CustomClips.Count}");
+            if (!BingBongNetworkSync.HasReachedHost)
+            {
+                GUI.color = new Color(1f, 0.6f, 0.4f);
+                GUILayout.Label("Waiting for first reply from the host (running over Photon).");
+                GUILayout.Label("Verify the host has the mod installed and is in the same Photon room.");
+                GUI.color = Color.white;
+            }
+            else if (BingBongNetworkSync.StatusText.Contains("failed"))
+            {
+                GUI.color = new Color(1f, 0.6f, 0.4f);
+                GUILayout.Label($"Sync status: {BingBongNetworkSync.StatusText}");
+                GUILayout.Label("Use Refresh Sounds button to retry.");
+                GUI.color = Color.white;
+            }
         }
-
-        GUILayout.Space(6f);
-        GUILayout.Label("Manual sync (enter the host's LAN IP if auto-detect did not fire):");
-        GUILayout.BeginHorizontal();
-        _manualHostIp = GUILayout.TextField(_manualHostIp, GUILayout.Width(200f));
-        if (GUILayout.Button("Sync from Host"))
-        {
-            string ip = _manualHostIp.Trim();
-            if (!string.IsNullOrWhiteSpace(ip))
-                BingBongNetworkSync.OnPlayerJoined(ip);
-        }
-        GUILayout.EndHorizontal();
     }
 
     // Draws the Importer tab with the URL field. returns: void
     private void DrawImporterTab()
     {
+        if (BingBongNetworkSync.IsConnectedAsClient)
+        {
+            GUI.color = new Color(1f, 1f, 0.5f);
+            GUILayout.Label(BingBongNetworkSync.HostAllowsClientImports
+                ? "Connected as client -- downloads will be sent to the host (AllowClientImports is ON)."
+                : "Connected as client -- host does not allow client imports.");
+            GUI.color = Color.white;
+            GUILayout.Space(4f);
+        }
+
         GUILayout.Label("Paste a direct audio URL (.ogg or .wav). The clip is normalized, validated, and added to the pool.");
         _importUrl = GUILayout.TextField(_importUrl);
         GUILayout.Label($"Status: {Plugin.ImportStatus}");
