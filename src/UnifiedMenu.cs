@@ -772,8 +772,13 @@ internal class UnifiedMenu : MonoBehaviour
 
         GUILayout.Space(8f);
         SectionHeader("Network");
-        GUILayout.Label($"  Max sync file size: {Plugin.MaxSyncFileSizeKb.Value} KB");
-        Plugin.MaxSyncFileSizeKb.Value = (int)GUILayout.HorizontalSlider(Plugin.MaxSyncFileSizeKb.Value, 64f, 8192f);
+        string maxSyncLabel = Plugin.MaxSyncFileSizeKb.Value <= 0
+            ? "  Max sync file size: unlimited"
+            : $"  Max sync file size: {Plugin.MaxSyncFileSizeKb.Value} KB";
+        GUILayout.Label(maxSyncLabel);
+        float maxSyncSlider = Plugin.MaxSyncFileSizeKb.Value <= 0 ? 0f : Plugin.MaxSyncFileSizeKb.Value;
+        maxSyncSlider = GUILayout.HorizontalSlider(maxSyncSlider, 0f, 8192f);
+        Plugin.MaxSyncFileSizeKb.Value = maxSyncSlider < 64f ? 0 : (int)maxSyncSlider;
         GUILayout.Space(4f);
         if (isHost)
         {

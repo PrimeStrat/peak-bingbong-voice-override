@@ -175,8 +175,8 @@ public partial class Plugin : BaseUnityPlugin
             "Seconds between auto-play triggers. Ignored when MusicMode is on.");
         MusicMode = Config.Bind("Playback", "MusicMode", false,
             "When true, plays through enabled clips back to back like a music player. Overrides AutoPlay.");
-        MaxSyncFileSizeKb = Config.Bind("Network", "MaxSyncFileSizeKb", 5120,
-            "Skip syncing/serving any sound file larger than this in kilobytes. Keeps multiplayer transfer fast.");
+        MaxSyncFileSizeKb = Config.Bind("Network", "MaxSyncFileSizeKb", 0,
+            "Maximum sync file size in kilobytes. Set to 0 for unlimited streaming sync.");
         TimedSubtitlesEnabled = Config.Bind("Subtitles", "TimedSubtitlesEnabled", false,
             "When true, clips with a timedSubtitles track display sing-along lines while holding Bing Bong. When false, only the single subtitle line is used.");
         FetchTimedSubtitlesOnImport = Config.Bind("Subtitles", "FetchTimedSubtitlesOnImport", false,
@@ -1394,7 +1394,6 @@ public partial class Plugin : BaseUnityPlugin
         PendingSyncClipNames.Add(clipName);
         BingBongNetworkSync.RegisterImportedFile(fileName);
         // Notify clients immediately so the wait loop below has something to wait on.
-        // Without this, clients are never signaled until after the 60s timeout fires.
         BingBongNetworkSync.AllowResync();
 
         if (!BingBongNetworkSync.IsHosting && !string.IsNullOrEmpty(BingBongNetworkSync.ActiveHostAddress)
@@ -1407,7 +1406,11 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         float syncElapsed = 0f;
-        while (!BingBongNetworkSync.IsImportedFileSynced(fileName) && syncElapsed < 60f)
+        float syncTimeout = 60f;
+        string audioPath = Path.Combine(SoundsFolder, fileName);
+        if (File.Exists(audioPath))
+            syncTimeout = Math.Max(60f, 45f + (float)(new FileInfo(audioPath).Length / (256d * 1024d)));
+        while (!BingBongNetworkSync.IsImportedFileSynced(fileName) && syncElapsed < syncTimeout)
         {
             int remaining = BingBongNetworkSync.GetPendingClientCount(fileName);
             ImportStatus = $"syncing to clients... {remaining} remaining";

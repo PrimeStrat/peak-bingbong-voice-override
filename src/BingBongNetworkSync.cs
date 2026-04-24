@@ -17,8 +17,7 @@ internal static class BingBongNetworkSync
     private const byte EV_FILE_CHUNK = 176;
     private const byte EV_CONFIRM_HAVE = 177;
     private const byte EV_SIGNAL = 178;
-    private const byte EV_REQ_SEL = 179;
-    private const byte EV_SELECTION = 180;
+    private const byte EV_STRING_BATCH = 181;
 
     private const byte SIG_REFRESH = 1;
     private const byte SIG_STOP = 2;
@@ -30,7 +29,14 @@ internal static class BingBongNetworkSync
     private const byte SIG_CLIP_ENABLED = 8;
     private const byte SIG_PERMISSIONS = 9;
 
-    private const int CHUNK_SIZE = 64 * 1024;
+    private const byte STRING_BATCH_FILE_LIST = 1;
+    private const byte STRING_BATCH_CONFIRM_HAVE = 2;
+
+    // Leave room for Photon serialization overhead instead of targeting the theoretical max payload size.
+    private const int CHUNK_SIZE = 12 * 1024;
+    private const int MAX_STRING_BATCH_BYTES = 12 * 1024;
+    private const int CHUNKS_PER_SEND_SLICE = 3;
+    private const float CLIENT_TRANSFER_STALL_TIMEOUT_SECONDS = 60f;
 
     // Human-readable transport state shown in menus and overlay.
     internal static string StatusText = "idle";
@@ -83,16 +89,48 @@ internal static class BingBongNetworkSync
     private static readonly Dictionary<string, HashSet<string>> _pendingImportedFileClients =
         new(StringComparer.OrdinalIgnoreCase);
 
-    // Incoming chunk buffers keyed by "senderActor:fileName".
-    private static readonly Dictionary<string, byte[][]> _chunkBuffers = new();
-    private static readonly Dictionary<string, int> _chunkExpected = new();
+    private static readonly Dictionary<string, IncomingChunkWriter> _incomingChunkWriters = new();
+    private static readonly Queue<PendingChunkSend> _outboundChunkQueue = new();
 
     // Client-side file list received from the host.
     private static List<(string name, long size)>? _hostFileList = null;
     // Files the client is still waiting to download (set populated when the file list arrives).
     private static readonly HashSet<string> _clientPendingFiles = new(StringComparer.OrdinalIgnoreCase);
-    // Selection JSON bytes most recently received from the host (consumed by the sync coroutine).
-    private static byte[]? _pendingSelectionBytes = null;
+    private static readonly Dictionary<string, string[][]> _stringBatchBuffers = new();
+    private static bool _sendPumpRunning = false;
+    private static float _lastClientTransferProgressAt = 0f;
+
+    private sealed class PendingChunkSend
+    {
+        internal string FileName = string.Empty;
+        internal string FilePath = string.Empty;
+        internal int TargetActor = -1;
+        internal long Length = 0L;
+        internal int TotalChunks = 0;
+        internal int NextChunkIndex = 0;
+        internal bool IsCompleted = false;
+        internal FileStream? Stream;
+
+        internal void Dispose()
+        {
+            Stream?.Dispose();
+            Stream = null;
+        }
+    }
+
+    private sealed class IncomingChunkWriter
+    {
+        internal string TempPath = string.Empty;
+        internal int TotalChunks = 0;
+        internal int ReceivedChunks = 0;
+        internal bool[] Received = Array.Empty<bool>();
+        internal FileStream Stream = null!;
+
+        internal void Dispose()
+        {
+            Stream?.Dispose();
+        }
+    }
 
     // Subscribes to Photon events and marks this client as the sound host.
     // returns: void
@@ -120,6 +158,8 @@ internal static class BingBongNetworkSync
         _hasReachedHost = false;
         StatusText = "idle";
         Patches.PhotonNet.Unsubscribe();
+        DisposeIncomingChunkWriters();
+        ClearOutboundChunkQueue();
         lock (_syncLock)
         {
             _lobbyPlayerNames.Clear();
@@ -128,11 +168,11 @@ internal static class BingBongNetworkSync
             _actorNames.Clear();
             _actorDownloadedFiles.Clear();
             _pendingImportedFileClients.Clear();
-            _chunkBuffers.Clear();
-            _chunkExpected.Clear();
+            _stringBatchBuffers.Clear();
             _clientPendingFiles.Clear();
             _hostFileList = null;
-            _pendingSelectionBytes = null;
+            _sendPumpRunning = false;
+            _lastClientTransferProgressAt = 0f;
         }
     }
 
@@ -246,9 +286,10 @@ internal static class BingBongNetworkSync
     {
         string filePath = Path.Combine(Plugin.SoundsFolder, fileName);
         if (!File.Exists(filePath)) yield break;
-        byte[] data = File.ReadAllBytes(filePath);
-        SendFileChunked(fileName, data, Patches.PhotonNet.MasterActorNumber);
-        yield break;
+        PendingChunkSend? transfer = EnqueueFileTransfer(fileName, filePath, Patches.PhotonNet.MasterActorNumber);
+        if (transfer == null) yield break;
+        while (!transfer.IsCompleted)
+            yield return null;
     }
 
     // Marks the local player as connected to the host and triggers the initial sync. Called
@@ -493,7 +534,7 @@ internal static class BingBongNetworkSync
             yield break;
         }
 
-        long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
+        long maxBytes = GetConfiguredMaxSyncBytes();
         List<string> needed = new();
         foreach ((string name, long size) in _hostFileList)
         {
@@ -515,25 +556,29 @@ internal static class BingBongNetworkSync
             foreach (string n in needed) _clientPendingFiles.Add(n);
         }
 
-        foreach (string name in needed)
-            Patches.PhotonNet.SendToMaster(EV_REQ_FILE, name);
-
-        // Wait for every requested chunk stream to complete, with an overall timeout.
-        float dlElapsed = 0f;
-        float perFileTimeoutBudget = Math.Max(30f, needed.Count * 30f);
-        while (true)
+        for (int i = 0; i < needed.Count; i++)
         {
-            int remaining;
-            lock (_syncLock) remaining = _clientPendingFiles.Count;
-            if (remaining == 0) break;
-            if (dlElapsed >= perFileTimeoutBudget)
+            string name = needed[i];
+            Patches.PhotonNet.SendToMaster(EV_REQ_FILE, name);
+            _lastClientTransferProgressAt = Time.unscaledTime;
+            while (true)
             {
-                Plugin.Log.LogWarning($"[Sync] Download timeout - {remaining} file(s) never completed.");
-                break;
+                bool completed;
+                int remaining;
+                lock (_syncLock)
+                {
+                    completed = !_clientPendingFiles.Contains(name);
+                    remaining = _clientPendingFiles.Count;
+                }
+                if (completed) break;
+                if (Time.unscaledTime - _lastClientTransferProgressAt >= CLIENT_TRANSFER_STALL_TIMEOUT_SECONDS)
+                {
+                    Plugin.Log.LogWarning($"[Sync] Download timeout for '{name}' - {remaining} file(s) still pending.");
+                    break;
+                }
+                StatusText = $"downloading ({needed.Count - remaining}/{needed.Count})";
+                yield return null;
             }
-            StatusText = $"downloading ({needed.Count - remaining}/{needed.Count})";
-            dlElapsed += Time.unscaledDeltaTime;
-            yield return null;
         }
 
         // Confirm every file we have on disk that the host advertises.
@@ -545,19 +590,11 @@ internal static class BingBongNetworkSync
                 presentFiles.Add(name);
         }
         if (presentFiles.Count > 0)
-            Patches.PhotonNet.SendToMaster(EV_CONFIRM_HAVE, presentFiles.ToArray());
+            SendStringBatchToMaster(STRING_BATCH_CONFIRM_HAVE, presentFiles);
 
-        // Pull selection.json.
-        _pendingSelectionBytes = null;
-        Patches.PhotonNet.SendToMaster(EV_REQ_SEL, null);
-        float selWait = 0f;
-        while (_pendingSelectionBytes == null && selWait < 5f)
-        {
-            selWait += Time.unscaledDeltaTime;
-            yield return null;
-        }
-        if (_pendingSelectionBytes != null)
-            ApplySelectionJson(_pendingSelectionBytes);
+        string selectionPath = Path.Combine(Plugin.SoundsFolder, "selection.json");
+        if (File.Exists(selectionPath))
+            ApplySelectionJson(File.ReadAllBytes(selectionPath));
 
         StatusText = "in sync";
         _clientSyncRunning = false;
@@ -578,8 +615,7 @@ internal static class BingBongNetworkSync
                 case EV_FILE_CHUNK: HandleFileChunk(data, senderActor); break;
                 case EV_CONFIRM_HAVE: HandleConfirmHave(data, senderActor); break;
                 case EV_SIGNAL: HandleSignal(data); break;
-                case EV_REQ_SEL: HandleReqSelection(senderActor); break;
-                case EV_SELECTION: HandleSelection(data); break;
+                case EV_STRING_BATCH: HandleStringBatch(data, senderActor); break;
             }
         }
         catch (Exception ex)
@@ -592,7 +628,7 @@ internal static class BingBongNetworkSync
     {
         if (!_running) return;
         TrackActor(senderActor);
-        long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
+        long maxBytes = GetConfiguredMaxSyncBytes();
         List<string> entries = new();
         try
         {
@@ -618,7 +654,7 @@ internal static class BingBongNetworkSync
         {
             Plugin.Log.LogWarning($"[Sync] Building file list failed: {ex.Message}");
         }
-        Patches.PhotonNet.SendToActor(EV_FILE_LIST, entries.ToArray(), senderActor);
+        SendStringBatchesToActor(STRING_BATCH_FILE_LIST, entries, senderActor);
     }
 
     private static void HandleFileList(object? data)
@@ -646,10 +682,9 @@ internal static class BingBongNetworkSync
         string filePath = Path.GetFullPath(Path.Combine(Plugin.SoundsFolder, fileName));
         string root = Path.GetFullPath(Plugin.SoundsFolder);
         if (!filePath.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(filePath)) return;
-        long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
+        long maxBytes = GetConfiguredMaxSyncBytes();
         if (new FileInfo(filePath).Length > maxBytes) return;
-        byte[] bytes = File.ReadAllBytes(filePath);
-        SendFileChunked(fileName, bytes, senderActor);
+        EnqueueFileTransfer(fileName, filePath, senderActor);
     }
 
     private static void HandleFileChunk(object? data, int senderActor)
@@ -662,83 +697,80 @@ internal static class BingBongNetworkSync
         byte[]? payload = arr[3] as byte[];
         if (payload == null || idx < 0 || total <= 0 || idx >= total) return;
 
+        string ext = Path.GetExtension(fileName).ToLowerInvariant();
+        if (_running)
+        {
+            if (Plugin.AllowClientImports == null || !Plugin.AllowClientImports.Value) return;
+            if (ext != ".ogg" && ext != ".wav" && ext != ".json") return;
+        }
+
+        string destPath = Path.GetFullPath(Path.Combine(Plugin.SoundsFolder, fileName!));
+        string root = Path.GetFullPath(Plugin.SoundsFolder);
+        if (!destPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return;
+
         string key = $"{senderActor}:{fileName}";
-        byte[][] buffer;
-        bool complete;
-        lock (_syncLock)
-        {
-            if (!_chunkBuffers.TryGetValue(key, out buffer))
-            {
-                buffer = new byte[total][];
-                _chunkBuffers[key] = buffer;
-                _chunkExpected[key] = total;
-            }
-            buffer[idx] = payload;
-            complete = AllChunksPresent(buffer);
-        }
-        if (!complete) return;
-
-        // Reassemble.
-        int totalLen = 0;
-        for (int i = 0; i < buffer.Length; i++) totalLen += buffer[i].Length;
-        byte[] full = new byte[totalLen];
-        int off = 0;
-        for (int i = 0; i < buffer.Length; i++)
-        {
-            Buffer.BlockCopy(buffer[i], 0, full, off, buffer[i].Length);
-            off += buffer[i].Length;
-        }
-        lock (_syncLock)
-        {
-            _chunkBuffers.Remove(key);
-            _chunkExpected.Remove(key);
-        }
-
+        IncomingChunkWriter? writer = null;
+        bool complete = false;
+        string tempPath = string.Empty;
         try
         {
-            string destPath = Path.GetFullPath(Path.Combine(Plugin.SoundsFolder, fileName!));
-            string root = Path.GetFullPath(Plugin.SoundsFolder);
-            if (!destPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return;
+            lock (_syncLock)
+            {
+                if (!_incomingChunkWriters.TryGetValue(key, out writer))
+                {
+                    writer = CreateIncomingChunkWriter(key, total);
+                    if (writer == null) return;
+                    _incomingChunkWriters[key] = writer;
+                }
+                if (writer.TotalChunks != total || writer.Received.Length != total) return;
+                if (!writer.Received[idx])
+                {
+                    writer.Stream.Position = (long)idx * CHUNK_SIZE;
+                    writer.Stream.Write(payload, 0, payload.Length);
+                    writer.Received[idx] = true;
+                    writer.ReceivedChunks++;
+                }
+                complete = writer.ReceivedChunks == writer.TotalChunks;
+                if (complete)
+                {
+                    tempPath = writer.TempPath;
+                    _incomingChunkWriters.Remove(key);
+                }
+            }
+            if (!_running)
+                _lastClientTransferProgressAt = Time.unscaledTime;
+            if (!complete) return;
 
-            string ext = Path.GetExtension(fileName).ToLowerInvariant();
+            writer!.Dispose();
+            if (File.Exists(destPath)) File.Delete(destPath);
+            File.Move(tempPath, destPath);
             if (_running)
             {
-                // Treat any chunk arriving at the host as a client upload (only if allowed).
-                if (Plugin.AllowClientImports == null || !Plugin.AllowClientImports.Value) return;
-                if (ext != ".ogg" && ext != ".wav" && ext != ".json") return;
-                File.WriteAllBytes(destPath, full);
                 Plugin.Log.LogInfo($"[Sync] Received uploaded '{fileName}' from actor {senderActor}.");
                 Plugin.Instance?.StartRefresh();
             }
             else
             {
-                File.WriteAllBytes(destPath, full);
                 Plugin.Log.LogInfo($"[Sync] Synced: {fileName}");
                 lock (_syncLock) _clientPendingFiles.Remove(fileName);
             }
         }
         catch (Exception ex)
         {
+            writer?.Dispose();
+            if (!string.IsNullOrEmpty(tempPath) && File.Exists(tempPath))
+                File.Delete(tempPath);
+            lock (_syncLock)
+                _incomingChunkWriters.Remove(key);
             Plugin.Log.LogWarning($"[Sync] Write failed for '{fileName}': {ex.Message}");
         }
-    }
-
-    private static bool AllChunksPresent(byte[][] buffer)
-    {
-        for (int i = 0; i < buffer.Length; i++)
-            if (buffer[i] == null) return false;
-        return true;
     }
 
     private static void HandleConfirmHave(object? data, int senderActor)
     {
         if (!_running || data is not string[] names) return;
         TrackActor(senderActor);
-        foreach (string name in names)
-        {
-            if (!string.IsNullOrEmpty(name))
-                RecordActorDownload(name, senderActor);
-        }
+        RecordActorDownloads(names, senderActor);
     }
 
     private static void HandleSignal(object? data)
@@ -810,41 +842,276 @@ internal static class BingBongNetworkSync
         }
     }
 
-    private static void HandleReqSelection(int senderActor)
+    // Reassembles multi-event string payloads used for large file manifests and confirmations.
+    private static void HandleStringBatch(object? data, int senderActor)
     {
-        if (!_running) return;
-        TrackActor(senderActor);
+        if (data is not object[] arr || arr.Length < 4) return;
+        byte kind = Convert.ToByte(arr[0]);
+        int batchIndex = Convert.ToInt32(arr[1]);
+        int batchTotal = Convert.ToInt32(arr[2]);
+        if (batchIndex < 0 || batchTotal <= 0 || batchIndex >= batchTotal) return;
+        if (arr[3] is not string[] items) return;
+
+        string key = $"{senderActor}:{kind}";
+        string[][] buffer;
+        bool complete;
+        lock (_syncLock)
+        {
+            if (!_stringBatchBuffers.TryGetValue(key, out buffer))
+            {
+                buffer = new string[batchTotal][];
+                _stringBatchBuffers[key] = buffer;
+            }
+            if (buffer.Length != batchTotal) return;
+            buffer[batchIndex] = items;
+            complete = AllStringBatchesPresent(buffer);
+        }
+        if (!complete) return;
+
+        List<string> merged = new();
+        lock (_syncLock)
+        {
+            foreach (string[] batch in buffer)
+                merged.AddRange(batch);
+            _stringBatchBuffers.Remove(key);
+        }
+
+        switch (kind)
+        {
+            case STRING_BATCH_FILE_LIST:
+                HandleFileList(merged.ToArray());
+                break;
+            case STRING_BATCH_CONFIRM_HAVE:
+                if (_running)
+                    RecordActorDownloads(merged, senderActor);
+                break;
+        }
+    }
+
+    // Queues a file for paced chunked transfer to the target actor.
+    private static PendingChunkSend? EnqueueFileTransfer(string fileName, string filePath, int targetActor)
+    {
+        if (targetActor < 0 || string.IsNullOrWhiteSpace(fileName) || !File.Exists(filePath)) return null;
+        FileInfo info = new(filePath);
+        PendingChunkSend transfer = new()
+        {
+            FileName = fileName,
+            FilePath = filePath,
+            TargetActor = targetActor,
+            Length = info.Length,
+            TotalChunks = Math.Max(1, (int)Math.Ceiling(info.Length / (double)CHUNK_SIZE))
+        };
+        bool startPump = false;
+        lock (_syncLock)
+        {
+            _outboundChunkQueue.Enqueue(transfer);
+            if (!_sendPumpRunning)
+            {
+                _sendPumpRunning = true;
+                startPump = true;
+            }
+        }
+        if (startPump && Plugin.Instance != null)
+            Plugin.Instance.StartCoroutine(ProcessOutboundChunkQueue());
+        return transfer;
+    }
+
+    private static IEnumerator ProcessOutboundChunkQueue()
+    {
+        while (true)
+        {
+            PendingChunkSend? transfer;
+            lock (_syncLock)
+            {
+                if (_outboundChunkQueue.Count == 0)
+                {
+                    _sendPumpRunning = false;
+                    yield break;
+                }
+                transfer = _outboundChunkQueue.Dequeue();
+            }
+
+            try
+            {
+                transfer.Stream ??= new FileStream(transfer.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                int sent = 0;
+                while (sent < CHUNKS_PER_SEND_SLICE && transfer.NextChunkIndex < transfer.TotalChunks)
+                {
+                    long chunkOffset = (long)transfer.NextChunkIndex * CHUNK_SIZE;
+                    int expectedLength = (int)Math.Min(CHUNK_SIZE, Math.Max(0L, transfer.Length - chunkOffset));
+                    byte[] slice = new byte[expectedLength];
+                    transfer.Stream.Position = chunkOffset;
+                    int read = transfer.Stream.Read(slice, 0, expectedLength);
+                    if (read <= 0)
+                        throw new EndOfStreamException($"Unexpected EOF while streaming '{transfer.FileName}'.");
+                    if (read != slice.Length)
+                        Array.Resize(ref slice, read);
+                    object[] payload = new object[] { transfer.FileName, transfer.NextChunkIndex, transfer.TotalChunks, slice };
+                    Patches.PhotonNet.SendToActor(EV_FILE_CHUNK, payload, transfer.TargetActor);
+                    transfer.NextChunkIndex++;
+                    sent++;
+                }
+
+                if (transfer.NextChunkIndex >= transfer.TotalChunks)
+                {
+                    transfer.IsCompleted = true;
+                    transfer.Dispose();
+                }
+                else
+                {
+                    lock (_syncLock)
+                        _outboundChunkQueue.Enqueue(transfer);
+                }
+            }
+            catch (Exception ex)
+            {
+                transfer.IsCompleted = true;
+                transfer.Dispose();
+                Plugin.Log.LogWarning($"[Sync] Send failed for '{transfer.FileName}': {ex.Message}");
+            }
+
+            yield return null;
+        }
+    }
+
+    private static void SendStringBatchesToActor(byte batchKind, List<string> items, int actorNumber)
+    {
+        List<string[]> batches = CreateStringBatches(items);
+        if (batches.Count == 1)
+        {
+            if (batchKind == STRING_BATCH_FILE_LIST)
+            {
+                Patches.PhotonNet.SendToActor(EV_FILE_LIST, batches[0], actorNumber);
+                return;
+            }
+        }
+        for (int i = 0; i < batches.Count; i++)
+        {
+            object[] payload = new object[] { batchKind, i, batches.Count, batches[i] };
+            Patches.PhotonNet.SendToActor(EV_STRING_BATCH, payload, actorNumber);
+        }
+    }
+
+    private static void SendStringBatchToMaster(byte batchKind, List<string> items)
+    {
+        List<string[]> batches = CreateStringBatches(items);
+        if (batches.Count == 1)
+        {
+            if (batchKind == STRING_BATCH_CONFIRM_HAVE)
+            {
+                Patches.PhotonNet.SendToMaster(EV_CONFIRM_HAVE, batches[0]);
+                return;
+            }
+        }
+        for (int i = 0; i < batches.Count; i++)
+        {
+            object[] payload = new object[] { batchKind, i, batches.Count, batches[i] };
+            Patches.PhotonNet.SendToMaster(EV_STRING_BATCH, payload);
+        }
+    }
+
+    private static List<string[]> CreateStringBatches(List<string> items)
+    {
+        List<string[]> batches = new();
+        if (items.Count == 0)
+        {
+            batches.Add(Array.Empty<string>());
+            return batches;
+        }
+
+        List<string> current = new();
+        int currentBytes = 0;
+        foreach (string item in items)
+        {
+            string value = item ?? string.Empty;
+            int itemBytes = Encoding.UTF8.GetByteCount(value) + sizeof(short);
+            bool wouldOverflow = current.Count > 0 && currentBytes + itemBytes > MAX_STRING_BATCH_BYTES;
+            if (wouldOverflow)
+            {
+                batches.Add(current.ToArray());
+                current = new List<string>();
+                currentBytes = 0;
+            }
+            current.Add(value);
+            currentBytes += itemBytes;
+        }
+        if (current.Count > 0)
+            batches.Add(current.ToArray());
+        return batches;
+    }
+
+    private static bool AllStringBatchesPresent(string[][] buffer)
+    {
+        for (int i = 0; i < buffer.Length; i++)
+            if (buffer[i] == null) return false;
+        return true;
+    }
+
+    private static long GetConfiguredMaxSyncBytes()
+    {
+        int maxKb = Plugin.MaxSyncFileSizeKb?.Value ?? 0;
+        if (maxKb <= 0) return long.MaxValue;
+        return Math.Max(64L, maxKb) * 1024L;
+    }
+
+    private static IncomingChunkWriter? CreateIncomingChunkWriter(string key, int totalChunks)
+    {
         try
         {
-            string selPath = Path.Combine(Plugin.SoundsFolder, "selection.json");
-            if (!File.Exists(selPath)) return;
-            byte[] bytes = File.ReadAllBytes(selPath);
-            Patches.PhotonNet.SendToActor(EV_SELECTION, bytes, senderActor);
+            string tempRoot = Path.Combine(Plugin.SoundsFolder, ".bbvo-sync-temp");
+            Directory.CreateDirectory(tempRoot);
+            string safeKey = key.Replace(':', '_').Replace('\\', '_').Replace('/', '_');
+            string tempPath = Path.Combine(tempRoot, safeKey + ".part");
+            return new IncomingChunkWriter
+            {
+                TempPath = tempPath,
+                TotalChunks = totalChunks,
+                Received = new bool[totalChunks],
+                Stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None)
+            };
         }
         catch (Exception ex)
         {
-            Plugin.Log.LogWarning($"[Sync] Selection serve failed: {ex.Message}");
+            Plugin.Log.LogWarning($"[Sync] Failed to create temp writer: {ex.Message}");
+            return null;
         }
     }
 
-    private static void HandleSelection(object? data)
+    private static void DisposeIncomingChunkWriters()
     {
-        if (data is byte[] bytes) _pendingSelectionBytes = bytes;
+        lock (_syncLock)
+        {
+            foreach (KeyValuePair<string, IncomingChunkWriter> kv in _incomingChunkWriters)
+            {
+                kv.Value.Dispose();
+                if (!string.IsNullOrEmpty(kv.Value.TempPath) && File.Exists(kv.Value.TempPath))
+                    File.Delete(kv.Value.TempPath);
+            }
+            _incomingChunkWriters.Clear();
+        }
     }
 
-    // Splits a file into Photon-sized chunks and dispatches each to the target actor.
-    private static void SendFileChunked(string fileName, byte[] bytes, int targetActor)
+    private static void ClearOutboundChunkQueue()
     {
-        if (targetActor < 0) return;
-        int total = Math.Max(1, (int)Math.Ceiling(bytes.Length / (double)CHUNK_SIZE));
-        for (int i = 0; i < total; i++)
+        lock (_syncLock)
         {
-            int off = i * CHUNK_SIZE;
-            int len = Math.Min(CHUNK_SIZE, bytes.Length - off);
-            byte[] slice = new byte[len];
-            Buffer.BlockCopy(bytes, off, slice, 0, len);
-            object[] payload = new object[] { fileName, i, total, slice };
-            Patches.PhotonNet.SendToActor(EV_FILE_CHUNK, payload, targetActor);
+            while (_outboundChunkQueue.Count > 0)
+            {
+                PendingChunkSend transfer = _outboundChunkQueue.Dequeue();
+                transfer.IsCompleted = true;
+                transfer.Dispose();
+            }
+        }
+    }
+
+    private static void RecordActorDownloads(IEnumerable<string> names, int senderActor)
+    {
+        if (!_running) return;
+        TrackActor(senderActor);
+        foreach (string name in names)
+        {
+            if (!string.IsNullOrEmpty(name))
+                RecordActorDownload(name, senderActor);
         }
     }
 
