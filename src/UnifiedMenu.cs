@@ -686,7 +686,7 @@ internal class UnifiedMenu : MonoBehaviour
             int servedFiles = BingBongNetworkSync.GetServedAudioFileCount();
             List<string> unsynced = BingBongNetworkSync.GetUnsyncedPlayerNames();
             List<(string displayName, int count)> clientCounts = BingBongNetworkSync.GetClientDownloadCounts();
-            GUILayout.Label($"Serving {servedFiles} audio file(s) to {clientCounts.Count} known client(s)");
+            GUILayout.Label($"Serving {servedFiles} file(s) to {clientCounts.Count} known client(s)");
 
             if (unsynced.Count > 0)
             {
