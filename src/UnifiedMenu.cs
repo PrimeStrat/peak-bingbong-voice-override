@@ -6,12 +6,15 @@ namespace BingBongVoiceOverride;
 // Single in-game IMGUI window with tabbed sections for status, sound selection, playback, network, and the URL importer.
 internal class UnifiedMenu : MonoBehaviour
 {
-    private Rect _windowRect = new Rect(0f, 0f, 620f, 520f);
+    private const float WIN_W = 820f;
+    private const float WIN_H = 660f;
+
+    private Rect _windowRect = new Rect(0f, 0f, WIN_W, WIN_H);
     private bool _windowRectInitialized = false;
     private Vector2 _soundsScroll = Vector2.zero;
     private string _importUrl = string.Empty;
     private int _activeTab = 0;
-    private readonly string[] _tabLabels = ["Status", "Sounds", "Playback", "Network", "Importer"];
+    private readonly string[] _tabLabels = ["  Status  ", "  Sounds  ", "  Playback  ", "  Network  ", "  Importer  "];
     private readonly Dictionary<string, string> _subtitleDrafts = new(StringComparer.OrdinalIgnoreCase);
 
     private Vector2 _playbackScroll = Vector2.zero;
@@ -22,34 +25,182 @@ internal class UnifiedMenu : MonoBehaviour
     private int _overlayStyleFontSize;
     private Font? _gameFont;
 
+    // Skin cache
+    private GUISkin? _skin;
+    private Texture2D? _texDark;
+    private Texture2D? _texMid;
+    private Texture2D? _texAccent;
+    private Texture2D? _texButton;
+    private Texture2D? _texButtonHover;
+    private Texture2D? _texButtonActive;
+    private Texture2D? _texHeader;
+
+    // On-join lobby HUD toast
+    internal static float JoinToastUntil = 0f;
+    private GUIStyle? _toastStyle;
+
     private static readonly Color TimedFillColor = new Color(0.96f, 0.97f, 0.55f, 1f);
     private static readonly Color TimedStrokeColor = new Color(0.08f, 0.08f, 0.04f, 1f);
     private const float TimedStrokeWidth = 3f;
     private const int TimedFontSizeDefault = 28;
 
-    // Polls the menu toggle key each frame. returns: void
+    // Polls the menu toggle key each frame and ticks the join toast. returns: void
     private void Update()
     {
         if (Input.GetKeyDown(Plugin.MenuToggleKey.Value))
             Plugin.SetMenuVisible(!Plugin.MenuVisible);
     }
 
+    // Builds a 1x1 solid-color texture. returns: Texture2D
+    private static Texture2D MakeTex(Color c)
+    {
+        Texture2D t = new Texture2D(1, 1);
+        t.SetPixel(0, 0, c);
+        t.Apply();
+        return t;
+    }
+
+    // Lazily builds the dark themed GUISkin used for the window. returns: GUISkin
+    private GUISkin GetSkin()
+    {
+        if (_skin != null) return _skin;
+
+        _texDark = MakeTex(new Color(0.10f, 0.10f, 0.13f, 0.97f));
+        _texMid = MakeTex(new Color(0.17f, 0.17f, 0.22f, 1f));
+        _texAccent = MakeTex(new Color(0.98f, 0.72f, 0.10f, 1f));
+        _texButton = MakeTex(new Color(0.22f, 0.22f, 0.30f, 1f));
+        _texButtonHover = MakeTex(new Color(0.30f, 0.30f, 0.42f, 1f));
+        _texButtonActive = MakeTex(new Color(0.98f, 0.72f, 0.10f, 1f));
+        _texHeader = MakeTex(new Color(0.14f, 0.14f, 0.19f, 1f));
+
+        _skin = Instantiate(GUI.skin);
+
+        _skin.window.normal.background = _texDark;
+        _skin.window.normal.textColor = new Color(0.98f, 0.72f, 0.10f, 1f);
+        _skin.window.focused.background = _texDark;
+        _skin.window.focused.textColor = new Color(0.98f, 0.72f, 0.10f, 1f);
+        _skin.window.onNormal.background = _texDark;
+        _skin.window.onNormal.textColor = new Color(0.98f, 0.72f, 0.10f, 1f);
+        _skin.window.fontSize = 14;
+        _skin.window.fontStyle = FontStyle.Bold;
+        _skin.window.padding = new RectOffset(10, 10, 28, 10);
+
+        _skin.label.normal.textColor = new Color(0.90f, 0.90f, 0.95f, 1f);
+        _skin.label.fontSize = 13;
+
+        _skin.button.normal.background = _texButton;
+        _skin.button.normal.textColor = new Color(0.92f, 0.92f, 1f, 1f);
+        _skin.button.hover.background = _texButtonHover;
+        _skin.button.hover.textColor = Color.white;
+        _skin.button.active.background = _texButtonActive;
+        _skin.button.active.textColor = new Color(0.08f, 0.08f, 0.08f, 1f);
+        _skin.button.fontSize = 14;
+        _skin.button.padding = new RectOffset(10, 10, 8, 8);
+        _skin.button.fixedHeight = 30f;
+
+        _skin.toggle.normal.textColor = new Color(0.85f, 0.85f, 0.90f, 1f);
+        _skin.toggle.fontSize = 13;
+        _skin.toggle.fixedHeight = 26f;
+
+        _skin.textField.normal.background = _texMid;
+        _skin.textField.normal.textColor = Color.white;
+        _skin.textField.focused.background = _texMid;
+        _skin.textField.focused.textColor = Color.white;
+        _skin.textField.fontSize = 13;
+        _skin.textField.padding = new RectOffset(6, 6, 6, 6);
+        _skin.textField.fixedHeight = 28f;
+
+        _skin.horizontalSlider.normal.background = _texMid;
+        _skin.horizontalSlider.fixedHeight = 14f;
+        _skin.horizontalSlider.padding = new RectOffset(0, 0, 0, 0);
+        _skin.horizontalSliderThumb.normal.background = _texAccent;
+        _skin.horizontalSliderThumb.hover.background = _texButtonHover;
+        _skin.horizontalSliderThumb.fixedWidth = 16f;
+        _skin.horizontalSliderThumb.fixedHeight = 20f;
+
+        // Toolbar (tab bar)
+        _skin.GetStyle("toolbar").normal.background = _texHeader;
+        _skin.GetStyle("toolbar").fontSize = 13;
+        _skin.GetStyle("toolbarButton").normal.background = _texHeader;
+        _skin.GetStyle("toolbarButton").normal.textColor = new Color(0.70f, 0.70f, 0.80f, 1f);
+        _skin.GetStyle("toolbarButton").hover.background = _texMid;
+        _skin.GetStyle("toolbarButton").hover.textColor = Color.white;
+        _skin.GetStyle("toolbarButton").active.background = _texAccent;
+        _skin.GetStyle("toolbarButton").active.textColor = new Color(0.06f, 0.06f, 0.06f, 1f);
+        _skin.GetStyle("toolbarButton").onNormal.background = _texAccent;
+        _skin.GetStyle("toolbarButton").onNormal.textColor = new Color(0.06f, 0.06f, 0.06f, 1f);
+        _skin.GetStyle("toolbarButton").onHover.background = _texAccent;
+        _skin.GetStyle("toolbarButton").onHover.textColor = new Color(0.06f, 0.06f, 0.06f, 1f);
+        _skin.GetStyle("toolbarButton").onActive.background = _texButtonHover;
+        _skin.GetStyle("toolbarButton").onActive.textColor = Color.white;
+        _skin.GetStyle("toolbarButton").fontSize = 13;
+        _skin.GetStyle("toolbarButton").fontStyle = FontStyle.Bold;
+        _skin.GetStyle("toolbarButton").padding = new RectOffset(10, 10, 6, 6);
+
+        _skin.scrollView.normal.background = _texDark;
+        _skin.verticalScrollbar.normal.background = _texMid;
+        _skin.verticalScrollbarThumb.normal.background = _texButton;
+
+        return _skin;
+    }
+
     // Draws the menu window when visible. returns: void
     private void OnGUI()
     {
         DrawSubtitleOverlay();
+        DrawJoinToast();
 
         if (!Plugin.MenuVisible) return;
         if (!_windowRectInitialized)
         {
             _windowRect = new Rect(
-                (Screen.width - 620f) * 0.5f,
-                (Screen.height - 520f) * 0.35f,
-                620f, 520f);
+                (Screen.width - WIN_W) * 0.5f,
+                (Screen.height - WIN_H) * 0.35f,
+                WIN_W, WIN_H);
             _windowRectInitialized = true;
         }
-        GUILayout.Window(9875, _windowRect, DrawWindow,
-            $"BingBong Voice Override  v{MyPluginInfo.PLUGIN_VERSION}  [{Plugin.MenuToggleKey.Value} to close]");
+
+        GUISkin prev = GUI.skin;
+        GUI.skin = GetSkin();
+        _windowRect = GUILayout.Window(9875, _windowRect, DrawWindow,
+            $"  BBVO  v{MyPluginInfo.PLUGIN_VERSION}   [{Plugin.MenuToggleKey.Value}] to close",
+            GUILayout.Width(WIN_W), GUILayout.Height(WIN_H));
+        GUI.skin = prev;
+    }
+
+    // Draws the on-join lobby HUD toast that fades out after a few seconds. returns: void
+    private void DrawJoinToast()
+    {
+        if (Time.unscaledTime > JoinToastUntil) return;
+
+        if (_toastStyle == null)
+        {
+            _toastStyle = new GUIStyle(GUI.skin.box)
+            {
+                fontSize = 16,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = true,
+                richText = false,
+            };
+            _toastStyle.normal.textColor = new Color(0.98f, 0.90f, 0.45f, 1f);
+            _toastStyle.normal.background = MakeTex(new Color(0.08f, 0.08f, 0.12f, 0.88f));
+            _toastStyle.padding = new RectOffset(18, 18, 12, 12);
+        }
+
+        float fade = Mathf.Clamp01((JoinToastUntil - Time.unscaledTime) / 1.5f);
+        Color prev = GUI.color;
+        GUI.color = new Color(1f, 1f, 1f, fade);
+
+        float w = 520f;
+        float h = 70f;
+        float x = (Screen.width - w) * 0.5f;
+        float y = Screen.height * 0.12f;
+        GUI.Box(new Rect(x, y, w, h),
+            $"BingBong Voice Override is active!  Press [{Plugin.MenuToggleKey.Value}] to open.",
+            _toastStyle);
+
+        GUI.color = prev;
     }
 
     // Draws timed subtitle fallback text with a hardcoded PEAK-like look. returns: void
@@ -150,8 +301,9 @@ internal class UnifiedMenu : MonoBehaviour
     // returns: void
     private void DrawWindow(int windowId)
     {
+        GUILayout.Space(4f);
         _activeTab = GUILayout.Toolbar(_activeTab, _tabLabels);
-        GUILayout.Space(6f);
+        GUILayout.Space(8f);
 
         switch (_activeTab)
         {
@@ -163,22 +315,47 @@ internal class UnifiedMenu : MonoBehaviour
         }
 
         GUILayout.FlexibleSpace();
+        GUILayout.Space(4f);
+
+        // Accent separator
+        Rect sep = GUILayoutUtility.GetRect(0, 2f, GUILayout.ExpandWidth(true));
+        GUI.DrawTexture(sep, _texAccent ?? Texture2D.whiteTexture);
+        GUILayout.Space(6f);
+
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Close")) Plugin.SetMenuVisible(false);
-        if (GUILayout.Button("Open Sounds Folder")) OpenSoundsFolder();
+        GUI.backgroundColor = new Color(0.8f, 0.25f, 0.25f, 1f);
+        if (GUILayout.Button("  Close  ", GUILayout.Width(90f)))
+            Plugin.SetMenuVisible(false);
+        GUI.backgroundColor = Color.white;
+        GUILayout.FlexibleSpace();
+        if (GUILayout.Button("Open Sounds Folder"))
+            OpenSoundsFolder();
         GUILayout.EndHorizontal();
+    }
+
+    // Draws a tinted section header label. returns: void
+    private static void SectionHeader(string text)
+    {
+        GUILayout.Space(4f);
+        Color prev = GUI.color;
+        GUI.color = new Color(0.98f, 0.72f, 0.10f, 1f);
+        GUILayout.Label(text);
+        GUI.color = prev;
+        GUILayout.Space(2f);
     }
 
     // Draws the Status tab. returns: void
     private void DrawStatusTab()
     {
+        SectionHeader("Info");
         GUI.color = new Color(0.7f, 1f, 1f);
-        GUILayout.Label($"Tip: While in-game, pause (Escape) then press [{Plugin.MenuToggleKey.Value}] to open this menu.");
+        GUILayout.Label($"Press [{Plugin.MenuToggleKey.Value}] while the escape menu is open to toggle this window.");
         GUI.color = Color.white;
-        GUILayout.Space(4f);
+        GUILayout.Space(6f);
 
         if (BingBongNetworkSync.IsConnectedAsClient)
         {
+            SectionHeader("Network");
             GUI.color = new Color(1f, 1f, 0.5f);
             GUILayout.Label("Connected as client -- sound selection and sync settings are controlled by the host.");
             string conn = BingBongNetworkSync.HasReachedHost
@@ -189,38 +366,54 @@ internal class UnifiedMenu : MonoBehaviour
             GUI.color = BingBongNetworkSync.HasReachedHost ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 0.6f, 0.4f);
             GUILayout.Label(conn);
             GUI.color = Color.white;
-            GUILayout.Space(4f);
+            GUILayout.Space(6f);
         }
 
+        SectionHeader("State");
+        Color readyColor = Plugin.ClipsReady ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 0.8f, 0.3f);
+        GUI.color = readyColor;
         GUILayout.Label($"Status:   {(Plugin.ClipsReady ? "ready" : "loading...")}");
+        GUI.color = Color.white;
         GUILayout.Label($"Loaded:   {Plugin.CustomClips.Count} clip(s)");
         GUILayout.Label($"Active:   {Plugin.GetActiveClips().Count} enabled");
         GUILayout.Label($"Last:     {Plugin.DebugLastPlayed}");
-        GUILayout.Label($"Subtitle: {Plugin.ActiveSubtitle}");
+        if (!string.IsNullOrWhiteSpace(Plugin.ActiveSubtitle))
+        {
+            GUI.color = new Color(1f, 0.97f, 0.6f);
+            GUILayout.Label($"Subtitle: {Plugin.ActiveSubtitle}");
+            GUI.color = Color.white;
+        }
 
         if (BingBongNetworkSync.IsHosting)
         {
             List<string> unsynced = BingBongNetworkSync.GetUnsyncedPlayerNames();
             if (unsynced.Count > 0)
             {
-                GUILayout.Space(4f);
+                GUILayout.Space(6f);
+                SectionHeader("Clients not yet synced");
                 GUI.color = new Color(1f, 0.6f, 0.4f);
-                GUILayout.Label($"Clients not yet synced ({unsynced.Count}): sounds blocked until synced.");
+                GUILayout.Label($"Sounds are blocked until all clients confirm. ({unsynced.Count} remaining)");
                 foreach (string name in unsynced)
                     GUILayout.Label($"  - {name}");
                 GUI.color = Color.white;
             }
         }
 
-        GUILayout.Space(6f);
+        GUILayout.Space(8f);
         bool canRefresh = Plugin.IsHoldingBingBong || Plugin.ForceEnableRefresh.Value;
         bool refreshBusy = Plugin.IsRefreshPending;
         GUI.enabled = canRefresh && !refreshBusy;
-        if (GUILayout.Button(refreshBusy ? "Syncing..." : "Refresh Sounds"))
+        GUI.backgroundColor = refreshBusy ? new Color(0.3f, 0.3f, 0.4f) : new Color(0.25f, 0.55f, 0.25f);
+        if (GUILayout.Button(refreshBusy ? "  Syncing...  " : "  Refresh Sounds  ", GUILayout.Width(180f)))
             Plugin.Instance.StartRefresh();
+        GUI.backgroundColor = Color.white;
         GUI.enabled = true;
         if (!canRefresh)
-            GUILayout.Label("(pick up Bing Bong, or set ForceEnableRefresh = true)");
+        {
+            GUI.color = new Color(0.7f, 0.7f, 0.7f);
+            GUILayout.Label("(pick up Bing Bong, or enable ForceEnableRefresh in config)");
+            GUI.color = Color.white;
+        }
     }
 
     // Draws the Sounds tab with per-clip enable checkboxes and a play-now button. returns: void

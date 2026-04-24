@@ -127,6 +127,7 @@ internal static class NetworkSyncPatches
             else
             {
                 BingBongNetworkSync.OnPlayerJoined(string.Empty);
+                UnifiedMenu.JoinToastUntil = UnityEngine.Time.unscaledTime + 8f;
             }
         }
         catch (Exception ex)
