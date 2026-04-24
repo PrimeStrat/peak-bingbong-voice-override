@@ -67,6 +67,7 @@ internal static class BingBongNetworkSync
     internal static bool ClientAllowSubtitleEdit = false;
     internal static bool ClientAllowSelectionEdit = false;
     internal static bool ClientAllowSettingsChange = false;
+    internal static bool ClientAllowMenu = true;
 
     private static readonly object _syncLock = new();
 
@@ -225,6 +226,7 @@ internal static class BingBongNetworkSync
         if (Plugin.AllowClientSubtitleEdit.Value) perms |= 2;
         if (Plugin.AllowClientSelectionEdit.Value) perms |= 4;
         if (Plugin.AllowClientSettingsChange.Value) perms |= 8;
+        if (Plugin.AllowClientMenu.Value) perms |= 16;
         Patches.PhotonNet.SendToOthers(EV_SIGNAL, new byte[] { SIG_PERMISSIONS, perms });
     }
 
@@ -799,7 +801,10 @@ internal static class BingBongNetworkSync
                     ClientAllowSubtitleEdit = (perms & 2) != 0;
                     ClientAllowSelectionEdit = (perms & 4) != 0;
                     ClientAllowSettingsChange = (perms & 8) != 0;
-                    Plugin.Log.LogInfo($"[Sync] Host permissions: playback={ClientAllowPlayback} subtitleEdit={ClientAllowSubtitleEdit} selectionEdit={ClientAllowSelectionEdit} settingsChange={ClientAllowSettingsChange}");
+                    ClientAllowMenu = (perms & 16) != 0;
+                    if (!ClientAllowMenu)
+                        Plugin.SetMenuVisible(false);
+                    Plugin.Log.LogInfo($"[Sync] Host permissions: playback={ClientAllowPlayback} subtitleEdit={ClientAllowSubtitleEdit} selectionEdit={ClientAllowSelectionEdit} settingsChange={ClientAllowSettingsChange} menu={ClientAllowMenu}");
                 }
                 break;
         }

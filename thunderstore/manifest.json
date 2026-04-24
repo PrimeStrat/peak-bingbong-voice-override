@@ -1,6 +1,6 @@
 {
     "name": "BingBongVoiceOverride",
-    "version_number": "1.0.0",
+    "version_number": "1.0.1",
     "website_url": "https://github.com/PrimeStrat/peak-bingbong-voice-override",
     "description": "Drop custom audio files into the sounds folder to override Bing Bong's SFX in PEAK. Supports .wav and .ogg. Picks a random clip each time he speaks.",
     "dependencies": [

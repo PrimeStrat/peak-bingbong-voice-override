@@ -7,7 +7,7 @@ config-version = "0.0.0"
 [package]
 namespace      = "PrimeStrat"
 name           = "BingBongVoiceOverride"
-versionNumber  = "1.0.0"
+versionNumber  = "1.0.1"
 description    = "Drop custom audio files into the sounds folder to override Bing Bong's SFX in PEAK."
 websiteUrl     = "https://github.com/PrimeStrat/peak-bingbong-voice-override"
 containsNsfwContent = false

@@ -383,7 +383,7 @@ def _detect_wrapping_folder(members: list[str]) -> str:
 def _parse_version(version_string: str) -> tuple[int, int, int]:
     """Parse a version tag into major, minor, patch integers.
 
-    @param version_string: Version string like 'v1.0.0', '1.0.0', or '5.4.2100'.
+    @param version_string: Version string like 'v1.0.1', '1.0.1', or '5.4.2100'.
     @return: Tuple of (major, minor, patch).
     """
     cleaned = version_string.lstrip("v").split("-")[0]

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 1.0.1
 - Initial release.
 - Automatically loads `.wav` and `.ogg` files from `BepInEx/plugins/PrimeStrat-BingBongVoiceOverride/sounds/`.
 - Patches `AudioSource.Play` and `AudioSource.PlayOneShot` on Bing Bong game objects to play random custom clips.

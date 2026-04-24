@@ -47,6 +47,13 @@ internal class UnifiedMenu : MonoBehaviour
     // Polls the menu toggle key each frame and ticks the join toast. returns: void
     private void Update()
     {
+        bool isClient = BingBongNetworkSync.IsConnectedAsClient;
+        if (isClient && !BingBongNetworkSync.ClientAllowMenu)
+        {
+            if (Plugin.MenuVisible)
+                Plugin.SetMenuVisible(false);
+            return;
+        }
         if (Input.GetKeyDown(Plugin.MenuToggleKey.Value))
             Plugin.SetMenuVisible(!Plugin.MenuVisible);
     }
@@ -421,14 +428,16 @@ internal class UnifiedMenu : MonoBehaviour
     private void DrawSoundsTab()
     {
         bool isClient = BingBongNetworkSync.IsConnectedAsClient;
+        bool canPlay = !isClient || BingBongNetworkSync.ClientAllowPlayback;
         bool canEditSelection = !isClient || BingBongNetworkSync.ClientAllowSelectionEdit;
         bool canEditSubtitle = !isClient || BingBongNetworkSync.ClientAllowSubtitleEdit;
         if (isClient)
         {
             GUI.color = new Color(1f, 1f, 0.5f);
+            string playPerm = BingBongNetworkSync.ClientAllowPlayback ? "allowed" : "locked";
             string selPerm = BingBongNetworkSync.ClientAllowSelectionEdit ? "can edit" : "read-only";
             string subPerm = BingBongNetworkSync.ClientAllowSubtitleEdit ? "can edit" : "read-only";
-            GUILayout.Label($"Connected as client -- selection: {selPerm}, subtitles: {subPerm}. Synced from host on join.");
+            GUILayout.Label($"Connected as client -- playback: {playPerm}, selection: {selPerm}, subtitles: {subPerm}.");
             GUI.color = Color.white;
             GUILayout.Space(4f);
         }
@@ -439,9 +448,10 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.enabled = canEditSelection;
         if (GUILayout.Button("Enable All")) SetAllEnabled(true);
         if (GUILayout.Button("Disable All")) SetAllEnabled(false);
-        GUI.enabled = true;
+        GUI.enabled = canPlay;
         if (GUILayout.Button("Stop Sound"))
             Plugin.StopAllManagedAudio();
+        GUI.enabled = true;
         GUILayout.EndHorizontal();
 
         GUILayout.Space(4f);
@@ -469,6 +479,7 @@ internal class UnifiedMenu : MonoBehaviour
             string subtitleTag = SubtitleLinkTag(clip.name);
             GUILayout.Label(subtitleTag, GUILayout.Width(46f));
 
+            GUI.enabled = canPlay;
             if (GUILayout.Button("Play", GUILayout.Width(60f)))
                 Plugin.PlayThroughPluginSource(clip);
             if (GUILayout.Button("Force Next", GUILayout.Width(90f)))
@@ -476,6 +487,7 @@ internal class UnifiedMenu : MonoBehaviour
                 Plugin.ForcedNextClipName = clip.name;
                 BingBongNetworkSync.BroadcastForceNext(clip.name);
             }
+            GUI.enabled = true;
 
             GUILayout.EndHorizontal();
 
@@ -530,8 +542,10 @@ internal class UnifiedMenu : MonoBehaviour
 
         GUILayout.Space(4f);
         GUILayout.Label($"Force next override pick: {(string.IsNullOrEmpty(Plugin.ForcedNextClipName) ? "(random)" : Plugin.ForcedNextClipName)}");
+        GUI.enabled = canPlay;
         if (GUILayout.Button("Clear Forced Pick"))
             Plugin.ForcedNextClipName = string.Empty;
+        GUI.enabled = true;
     }
 
     // Draws the Playback tab as a full music player with transport controls and a scrollable queue. returns: void
@@ -774,6 +788,8 @@ internal class UnifiedMenu : MonoBehaviour
                 "  Allow clients to toggle clip enabled states");
             Plugin.AllowClientSettingsChange.Value = GUILayout.Toggle(Plugin.AllowClientSettingsChange.Value,
                 "  Allow clients to change settings (volume, mode, autoplay)");
+            Plugin.AllowClientMenu.Value = GUILayout.Toggle(Plugin.AllowClientMenu.Value,
+                "  Allow clients to open the mod menu");
         }
         else if (isClient)
         {
@@ -784,6 +800,7 @@ internal class UnifiedMenu : MonoBehaviour
             GUILayout.Label($"  Subtitle editing:  {yn(BingBongNetworkSync.ClientAllowSubtitleEdit)}");
             GUILayout.Label($"  Clip selection:    {yn(BingBongNetworkSync.ClientAllowSelectionEdit)}");
             GUILayout.Label($"  Settings changes:  {yn(BingBongNetworkSync.ClientAllowSettingsChange)}");
+            GUILayout.Label($"  Menu access:       {yn(BingBongNetworkSync.ClientAllowMenu)}");
         }
 
         GUILayout.Space(8f);
@@ -800,23 +817,29 @@ internal class UnifiedMenu : MonoBehaviour
     // Draws the Importer tab with the URL field. returns: void
     private void DrawImporterTab()
     {
-        if (BingBongNetworkSync.IsConnectedAsClient)
+        bool isClient = BingBongNetworkSync.IsConnectedAsClient;
+        bool canImport = !isClient || BingBongNetworkSync.HostAllowsClientImports;
+
+        if (isClient)
         {
-            GUI.color = new Color(1f, 1f, 0.5f);
-            GUILayout.Label(BingBongNetworkSync.HostAllowsClientImports
-                ? "Connected as client - downloads will be sent to the host (AllowClientImports is ON)."
-                : "Connected as client - host does not allow client imports.");
+            GUI.color = canImport ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 0.6f, 0.4f);
+            GUILayout.Label(canImport
+                ? "Connected as client -- host allows imports. Your download will be sent to the host."
+                : "Connected as client -- host does not allow client imports.");
             GUI.color = Color.white;
             GUILayout.Space(4f);
         }
 
-        GUILayout.Label("Paste a direct audio URL (.ogg or .wav). The clip is normalized, validated, and added to the pool.");
+        GUILayout.Label("Paste a direct audio URL (.ogg, .wav, or YouTube/Twitch). The clip is normalized and added to the pool.");
+        GUI.enabled = canImport;
         _importUrl = GUILayout.TextField(_importUrl);
+        GUI.enabled = true;
         GUILayout.Label($"Status: {Plugin.ImportStatus}");
 
         GUILayout.Space(6f);
+        GUI.enabled = canImport;
         Plugin.FetchTimedSubtitlesOnImport.Value = GUILayout.Toggle(Plugin.FetchTimedSubtitlesOnImport.Value,
-            "  Also fetch timed sing-along subtitles for this import [experimental] (yt-dlp captions)"); ;
+            "  Also fetch timed sing-along subtitles for this import [experimental] (yt-dlp captions)");
 
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Download + Refresh"))
@@ -824,6 +847,7 @@ internal class UnifiedMenu : MonoBehaviour
         if (GUILayout.Button("Clear"))
             _importUrl = string.Empty;
         GUILayout.EndHorizontal();
+        GUI.enabled = true;
     }
 
     // Sets every loaded clip's enabled flag and persists the change.

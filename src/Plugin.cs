@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -43,6 +44,7 @@ public partial class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> AllowClientSubtitleEdit = null!;
     internal static ConfigEntry<bool> AllowClientSelectionEdit = null!;
     internal static ConfigEntry<bool> AllowClientSettingsChange = null!;
+    internal static ConfigEntry<bool> AllowClientMenu = null!;
     internal static readonly List<AudioClip> CustomClips = [];
     internal static readonly Dictionary<string, string> SubtitleOverrides =
         new(StringComparer.OrdinalIgnoreCase);
@@ -177,7 +179,7 @@ public partial class Plugin : BaseUnityPlugin
             "Skip syncing/serving any sound file larger than this in kilobytes. Keeps multiplayer transfer fast.");
         TimedSubtitlesEnabled = Config.Bind("Subtitles", "TimedSubtitlesEnabled", false,
             "When true, clips with a timedSubtitles track display sing-along lines while holding Bing Bong. When false, only the single subtitle line is used.");
-        FetchTimedSubtitlesOnImport = Config.Bind("Subtitles", "FetchTimedSubtitlesOnImport", true,
+        FetchTimedSubtitlesOnImport = Config.Bind("Subtitles", "FetchTimedSubtitlesOnImport", false,
             "When true, the importer also runs yt-dlp to fetch a timed caption track for the clip. When false, only a placeholder single-line subtitle JSON is written.");
         ShowSubtitleOverlay = Config.Bind("Subtitles", "ShowSubtitleOverlay", false,
             "When true, the mod draws its own subtitle overlay near the bottom of the screen while holding Bing Bong (recommended; the game UI does not always honor overrides).");
@@ -187,7 +189,7 @@ public partial class Plugin : BaseUnityPlugin
             "When true, custom clip subtitles are also pushed into PEAK's native subtitle table. When false, native subtitle text is suppressed for custom audio.");
         AllowClientImports = Config.Bind("Network", "AllowClientImports", false,
             "When true, any connected client can upload new sound files through the mod's HTTP sync server.");
-        AllowClientPlayback = Config.Bind("Network", "AllowClientPlayback", true,
+        AllowClientPlayback = Config.Bind("Network", "AllowClientPlayback", false,
             "When true, non-host players can use playback controls (play/pause/stop/force-next) from their menu.");
         AllowClientSubtitleEdit = Config.Bind("Network", "AllowClientSubtitleEdit", false,
             "When true, non-host players can save subtitle overrides that sync to all players.");
@@ -195,11 +197,14 @@ public partial class Plugin : BaseUnityPlugin
             "When true, non-host players can toggle clip enabled states that sync to all players.");
         AllowClientSettingsChange = Config.Bind("Network", "AllowClientSettingsChange", false,
             "When true, non-host players can change playback settings (volume, autoplay, etc.) via the menu.");
+        AllowClientMenu = Config.Bind("Network", "AllowClientMenu", true,
+            "When false, connected clients cannot open the mod menu at all.");
 
         AllowClientPlayback.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
         AllowClientSubtitleEdit.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
         AllowClientSelectionEdit.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
         AllowClientSettingsChange.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
+        AllowClientMenu.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
         MenuToggleKey = Config.Bind("Menu", "MenuToggleKey", KeyCode.F6,
             "Toggle the unified mod menu on/off.");
         ForceEnableRefresh = Config.Bind("Menu", "ForceEnableRefresh", true,
@@ -1111,6 +1116,8 @@ public partial class Plugin : BaseUnityPlugin
 
         string baseName = ResolveBaseNameFromLink(request, uri);
         string safeBase = NormalizeFileName(baseName);
+        if (safeBase.Length > 60)
+            safeBase = safeBase.Substring(0, 60);
         string finalName = $"{safeBase}_{DateTime.UtcNow:yyyyMMdd_HHmmss}{normalizedExt}";
         string finalPath = Path.Combine(SoundsFolder, finalName);
 
@@ -1141,6 +1148,24 @@ public partial class Plugin : BaseUnityPlugin
             yield break;
         }
 
+        string pluginDirForFfmpeg = Path.GetDirectoryName(typeof(Plugin).Assembly.Location) ?? string.Empty;
+        string ffmpeg = FindFfmpeg(pluginDirForFfmpeg);
+        if (string.IsNullOrEmpty(ffmpeg))
+        {
+            ImportStatus = "ffmpeg not found -- downloading automatically...";
+            yield return StartCoroutine(TryAutoDownloadFfmpegCoroutine(pluginDirForFfmpeg));
+            ffmpeg = FindFfmpeg(pluginDirForFfmpeg);
+        }
+        if (string.IsNullOrEmpty(ffmpeg))
+        {
+            ImportStatus = "error: ffmpeg could not be found or downloaded. Get it from https://ffmpeg.org/download.html";
+            yield break;
+        }
+
+        string ffmpegLocationArg = Path.IsPathRooted(ffmpeg)
+            ? $" --ffmpeg-location \"{Path.GetDirectoryName(ffmpeg)}\""
+            : string.Empty;
+
         string timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
         string outTemplate = Path.Combine(SoundsFolder, $"yt_{timestamp}.%(ext)s");
 
@@ -1148,6 +1173,7 @@ public partial class Plugin : BaseUnityPlugin
         {
             FileName = ytDlp,
             Arguments = $"-x --no-playlist -N 4 --audio-format vorbis --audio-quality 8"
+                + ffmpegLocationArg
                 + $" --print \"%(title)s\""
                 + $" --print \"after_move:%(filepath)s\""
                 + $" --postprocessor-args \"ffmpeg:-ac 1 -ar 32000\""
@@ -1224,6 +1250,8 @@ public partial class Plugin : BaseUnityPlugin
         string safeBase = NormalizeFileName(detectedTitle);
         if (string.IsNullOrWhiteSpace(safeBase))
             safeBase = $"yt_{timestamp}";
+        if (safeBase.Length > 60)
+            safeBase = safeBase.Substring(0, 60);
         string finalName = $"{safeBase}_{timestamp}{ext}";
         string finalPath = Path.Combine(SoundsFolder, finalName);
         if (!outputPath.Equals(finalPath, StringComparison.OrdinalIgnoreCase))
@@ -1630,6 +1658,82 @@ public partial class Plugin : BaseUnityPlugin
         {
             Log.LogWarning($"[YtDlp] Could not write yt-dlp.exe: {ex.Message}");
         }
+    }
+
+    // Downloads ffmpeg.exe and ffprobe.exe from yt-dlp's FFmpeg-Builds into the given directory.
+    // targetDir (string): Directory to extract ffmpeg.exe and ffprobe.exe into.
+    // returns: IEnumerator
+    private IEnumerator TryAutoDownloadFfmpegCoroutine(string targetDir)
+    {
+        const string downloadUrl = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-essentials.zip";
+        ImportStatus = "Downloading ffmpeg...";
+        using UnityWebRequest req = new UnityWebRequest(downloadUrl, UnityWebRequest.kHttpVerbGET);
+        req.downloadHandler = new DownloadHandlerBuffer();
+        yield return req.SendWebRequest();
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            Log.LogWarning($"[Ffmpeg] Auto-download failed: {req.error}");
+            yield break;
+        }
+        try
+        {
+            using MemoryStream ms = new MemoryStream(req.downloadHandler.data);
+            using ZipArchive zip = new ZipArchive(ms, ZipArchiveMode.Read);
+            foreach (ZipArchiveEntry entry in zip.Entries)
+            {
+                string name = Path.GetFileName(entry.FullName);
+                if (!name.Equals("ffmpeg.exe", StringComparison.OrdinalIgnoreCase)
+                    && !name.Equals("ffprobe.exe", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                string dest = Path.Combine(targetDir, name);
+                using Stream src = entry.Open();
+                using FileStream dst = File.Create(dest);
+                src.CopyTo(dst);
+                Log.LogInfo($"[Ffmpeg] Extracted {name} to {dest}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.LogWarning($"[Ffmpeg] Could not extract ffmpeg: {ex.Message}");
+        }
+    }
+
+    // Finds ffmpeg.exe by checking the given preferred directory first, then PATH.
+    // preferDir (string): Directory to check before PATH (usually the plugin folder).
+    // returns: string
+    private static string FindFfmpeg(string preferDir)
+    {
+        string[] candidates =
+        [
+            Path.Combine(preferDir, "ffmpeg.exe"),
+            Path.Combine(preferDir, "ffmpeg"),
+            "ffmpeg",
+            "ffmpeg.exe",
+        ];
+        foreach (string candidate in candidates)
+        {
+            try
+            {
+                ProcessStartInfo probe = new()
+                {
+                    FileName = candidate,
+                    Arguments = "-version",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                using Process? p = Process.Start(probe);
+                if (p != null)
+                {
+                    p.WaitForExit(3000);
+                    if (p.ExitCode == 0)
+                        return candidate;
+                }
+            }
+            catch (Exception) { }
+        }
+        return string.Empty;
     }
 
     // Finds the yt-dlp executable by checking PATH, the plugin folder, and common install locations.
