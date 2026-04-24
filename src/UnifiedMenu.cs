@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 namespace BingBongVoiceOverride;
 
-/// Single in-game IMGUI window with tabbed sections for status, sound selection, playback, network, and the URL importer.
+// Single in-game IMGUI window with tabbed sections for status, sound selection, playback, network, and the URL importer.
 internal class UnifiedMenu : MonoBehaviour
 {
     private Rect _windowRect = new Rect(0f, 0f, 620f, 520f);
@@ -24,16 +24,14 @@ internal class UnifiedMenu : MonoBehaviour
     private const float TimedStrokeWidth = 3f;
     private const int TimedFontSizeDefault = 28;
 
-    /// Polls the menu toggle key each frame.
-    /// <returns>void</returns>
+    // Polls the menu toggle key each frame. returns: void
     private void Update()
     {
         if (Input.GetKeyDown(Plugin.MenuToggleKey.Value))
             Plugin.SetMenuVisible(!Plugin.MenuVisible);
     }
 
-    /// Draws the menu window when visible.
-    /// <returns>void</returns>
+    // Draws the menu window when visible. returns: void
     private void OnGUI()
     {
         DrawSubtitleOverlay();
@@ -51,8 +49,7 @@ internal class UnifiedMenu : MonoBehaviour
             $"BingBong Voice Override  v{MyPluginInfo.PLUGIN_VERSION}  [{Plugin.MenuToggleKey.Value} to close]");
     }
 
-    /// Draws timed subtitle fallback text with a hardcoded PEAK-like look from the reference screenshot.
-    /// <returns>void</returns>
+    // Draws timed subtitle fallback text with a hardcoded PEAK-like look. returns: void
     private void DrawSubtitleOverlay()
     {
         bool forceOverlay = Plugin.IsTimedSubtitleActive
@@ -124,8 +121,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.matrix = savedMatrix;
     }
 
-    /// Resolves a font for timed subtitles by scanning fonts already loaded by the game. Falls back to null (uses default GUI skin font).
-    /// <returns>A loaded game Font, or null to use the default.</returns>
+    // Resolves a font for timed subtitles by scanning fonts loaded by the game. returns: Font - loaded game font, or null to use default
     private Font? ResolveTimedSubtitleFont()
     {
         if (_gameFont != null)
@@ -146,9 +142,9 @@ internal class UnifiedMenu : MonoBehaviour
         return null;
     }
 
-    /// Renders the tabbed window contents.
-    /// <param name="windowId">Unity window identifier.</param>
-    /// <returns>void</returns>
+    // Renders the tabbed window contents.
+    // windowId (int): Unity window identifier
+    // returns: void
     private void DrawWindow(int windowId)
     {
         _activeTab = GUILayout.Toolbar(_activeTab, _tabLabels);
@@ -170,8 +166,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    /// Draws the Status tab.
-    /// <returns>void</returns>
+    // Draws the Status tab. returns: void
     private void DrawStatusTab()
     {
         GUILayout.Label($"Status:   {(Plugin.ClipsReady ? "ready" : "loading...")}");
@@ -190,8 +185,7 @@ internal class UnifiedMenu : MonoBehaviour
             GUILayout.Label("(pick up Bing Bong, or set ForceEnableRefresh = true)");
     }
 
-    /// Draws the Sounds tab with per-clip enable checkboxes and a play-now button.
-    /// <returns>void</returns>
+    // Draws the Sounds tab with per-clip enable checkboxes and a play-now button. returns: void
     private void DrawSoundsTab()
     {
         GUILayout.Label("Check the clips that should be in the random pool. Click 'Play' to force-pick one now.");
@@ -283,8 +277,7 @@ internal class UnifiedMenu : MonoBehaviour
             Plugin.ForcedNextClipName = string.Empty;
     }
 
-    /// Draws the Playback tab with volume, distance, autoplay, and music mode controls.
-    /// <returns>void</returns>
+    // Draws the Playback tab with volume, distance, autoplay, and music mode controls. returns: void
     private void DrawPlaybackTab()
     {
         GUILayout.Label($"Volume Multiplier: {Plugin.VolumeMultiplier.Value:F2}x");
@@ -333,8 +326,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    /// Draws the Network tab with sync status and size guard.
-    /// <returns>void</returns>
+    // Draws the Network tab with sync status and size guard. returns: void
     private void DrawNetworkTab()
     {
         GUILayout.Label($"Sync server: {BingBongNetworkSync.StatusText}");
@@ -389,8 +381,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    /// Draws the Importer tab with the URL field.
-    /// <returns>void</returns>
+    // Draws the Importer tab with the URL field. returns: void
     private void DrawImporterTab()
     {
         GUILayout.Label("Paste a direct audio URL (.ogg or .wav). The clip is normalized, validated, and added to the pool.");
@@ -409,9 +400,9 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    /// Sets every loaded clip's enabled flag and persists the change.
-    /// <param name="value">True to enable all, false to disable all.</param>
-    /// <returns>void</returns>
+    // Sets every loaded clip's enabled flag and persists the change.
+    // value (bool): true to enable all, false to disable all
+    // returns: void
     private void SetAllEnabled(bool value)
     {
         foreach (AudioClip c in Plugin.CustomClips)
@@ -419,8 +410,7 @@ internal class UnifiedMenu : MonoBehaviour
         Plugin.SaveSelection();
     }
 
-    /// Opens the sounds folder in the OS file explorer.
-    /// <returns>void</returns>
+    // Opens the sounds folder in the OS file explorer. returns: void
     private void OpenSoundsFolder()
     {
         try
@@ -433,9 +423,9 @@ internal class UnifiedMenu : MonoBehaviour
         }
     }
 
-    /// Returns a short tag showing whether a subtitle JSON override is linked to the clip.
-    /// <param name="clipName">Clip name (no extension) to look up in SubtitleOverrides.</param>
-    /// <returns>"[S]", "[T]", "[ST]", or "[ ]" depending on which overrides are present.</returns>
+    // Returns a short tag showing which subtitle overrides are linked to the clip.
+    // clipName (string): clip name (no extension) to look up in SubtitleOverrides
+    // returns: string - "[S]", "[T]", "[ST]", or "[ ]" depending on which overrides are present
     private static string SubtitleLinkTag(string clipName)
     {
         bool hasSimple = Plugin.SubtitleOverrides.TryGetValue(clipName, out string val) && !string.IsNullOrWhiteSpace(val);

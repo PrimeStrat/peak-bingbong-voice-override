@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace BingBongVoiceOverride.Patches;
 
-/// Reflection-only bridge to PEAK's native Bing Bong response and subtitle systems. Mirrors the technique used by BingBongVoiceLineAPI: write into LocalizedText.mainTable and rewrite Action_AskBingBong.responses so PEAK plays our clips with native UI.
+// Reflection-only bridge to PEAK's native Bing Bong response and subtitle systems. Mirrors the technique used by BingBongVoiceLineAPI.
 internal static class NativeBingBongBridge
 {
     internal const string OverrideSubtitleId = "BBVO_OVERRIDE_SUBTITLE";
@@ -32,8 +32,8 @@ internal static class NativeBingBongBridge
 
     private static readonly Dictionary<int, string> AssignedIdByClip = new Dictionary<int, string>();
 
-    /// Resolves all reflection handles once and caches success state. Safe to call repeatedly.
-    /// <returns>True when every required type and member is resolved.</returns>
+    // Resolves all reflection handles once and caches success state. Safe to call repeatedly.
+    // returns: bool - true when every required type and member is resolved
     internal static bool TryResolve()
     {
         if (_resolved) return _resolveOk;
@@ -92,10 +92,10 @@ internal static class NativeBingBongBridge
         }
     }
 
-    /// Writes the given text into LocalizedText.mainTable[id] across every language slot so the native UI displays it on the next lookup.
-    /// <param name="id">Subtitle id used by a BingBongResponse (uppercased before storage).</param>
-    /// <param name="text">Text to display.</param>
-    /// <returns>True when the table was updated.</returns>
+    // Writes the given text into LocalizedText.mainTable[id] across every language slot.
+    // id (string): subtitle id used by a BingBongResponse (uppercased before storage)
+    // text (string): text to display
+    // returns: bool - true when the table was updated
     internal static bool WriteSubtitle(string id, string text)
     {
         if (!TryResolve()) return false;
@@ -128,9 +128,9 @@ internal static class NativeBingBongBridge
         }
     }
 
-    /// Replaces the responses array on the given Action_AskBingBong instance with one entry per loaded plugin clip, each mapped to our control subtitle id so a follow-up WriteSubtitle drives the native UI.
-    /// <param name="askInstance">An Action_AskBingBong instance discovered in the scene.</param>
-    /// <returns>True when the responses array was rewritten.</returns>
+    // Replaces the responses array on the given Action_AskBingBong instance with one entry per loaded plugin clip.
+    // askInstance (object): an Action_AskBingBong instance discovered in the scene
+    // returns: bool - true when the responses array was rewritten
     internal static bool RewriteResponses(object askInstance)
     {
         if (!TryResolve() || askInstance == null) return false;
@@ -168,9 +168,9 @@ internal static class NativeBingBongBridge
         }
     }
 
-    /// Returns the subtitle id assigned to the given clip during the most recent RewriteResponses pass, or empty when not assigned.
-    /// <param name="clip">Clip whose subtitle id to look up.</param>
-    /// <returns>Assigned id or empty string.</returns>
+    // Returns the subtitle id assigned to the given clip during the most recent RewriteResponses pass.
+    // clip (AudioClip): clip whose subtitle id to look up
+    // returns: string - assigned id or empty string
     internal static string GetAssignedSubtitleId(AudioClip clip)
     {
         if (clip == null) return string.Empty;
@@ -178,8 +178,8 @@ internal static class NativeBingBongBridge
         return id ?? string.Empty;
     }
 
-    /// Scans every loaded Action_AskBingBong instance and rewrites its responses array. Useful after clip reloads.
-    /// <returns>Number of instances rewritten.</returns>
+    // Scans every loaded Action_AskBingBong instance and rewrites its responses array. Useful after clip reloads.
+    // returns: int - number of instances rewritten
     internal static int RewriteAllInScene()
     {
         if (!TryResolve()) return 0;

@@ -5,7 +5,7 @@ using HarmonyLib;
 using UnityEngine;
 namespace BingBongVoiceOverride.Patches;
 
-/// Patches common Unity text setters so active Bing Bong subtitle overrides can replace the game's default subtitle line.
+// Patches common Unity text setters so active Bing Bong subtitle overrides can replace the game's default subtitle line.
 internal static class SubtitleTextOverridePatches
 {
     private static readonly List<object> TrackedTargets = [];
@@ -33,9 +33,9 @@ internal static class SubtitleTextOverridePatches
     internal static TextAnchor CapturedAnchor = TextAnchor.MiddleCenter;
     internal static Rect CapturedScreenRect = new Rect(0f, 0f, 0f, 0f);
 
-    /// Applies best-effort patches for Unity UI and TextMeshPro text setters.
-    /// <param name="harmony">Active Harmony instance used by the plugin.</param>
-    /// <returns>void</returns>
+    // Applies best-effort patches for Unity UI and TextMeshPro text setters.
+    // harmony (Harmony): active Harmony instance used by the plugin
+    // returns: void
     internal static void Apply(Harmony harmony)
     {
         TryPatchTextSetter(harmony, "UnityEngine.UI.Text");
@@ -104,11 +104,9 @@ internal static class SubtitleTextOverridePatches
         }
     }
 
-    /// Drives per-frame override behavior. For single-line subtitles it pushes the active text into the native UI; for timed subtitles it blanks the native UI so only the IMGUI overlay shows.
-    /// <returns>void</returns>
-    /// Opens a short discovery window during which any text setter write is captured as a candidate subtitle target. Called by Plugin.OnClipPlayed.
-    /// <param name="durationSeconds">How long the window stays open.</param>
-    /// <returns>void</returns>
+    // Opens a short discovery window during which any text setter write is captured as a candidate subtitle target. Called by Plugin.OnClipPlayed.
+    // durationSeconds (float): how long the window stays open
+    // returns: void
     internal static void BeginDiscoveryWindow(float durationSeconds)
     {
         float now = Time.unscaledTime;
@@ -117,6 +115,8 @@ internal static class SubtitleTextOverridePatches
             _discoverUntil = end;
     }
 
+    // Drives per-frame override behavior; pushes active subtitle into native UI or blanks it for timed subtitle mode.
+    // returns: void
     internal static void TickForceActiveSubtitle()
     {
         if (Plugin.MenuVisible)

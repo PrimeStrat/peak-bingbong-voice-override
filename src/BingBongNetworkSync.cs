@@ -8,17 +8,7 @@ using System.Threading;
 using UnityEngine;
 namespace BingBongVoiceOverride;
 
-/// 
-/// HTTP-based sound sync server (host) and downloader (client).
-///
-/// Host side: after clips load, a lightweight HttpListener serves the sound file
-/// list and raw bytes on port 28472 so joining clients can pull them.
-///
-/// Client side: call OnPlayerJoined(hostAddress) from a Harmony patch on the
-/// game's player-join event (e.g. the method that fires when the local client
-/// finishes connecting to a session). Supply the host's LAN IP and this class
-/// downloads any missing .ogg files then triggers a sound refresh automatically.
-/// 
+// HTTP-based sound sync server (host) and downloader (client). Host serves .ogg/.wav files on port 28472; clients download missing files on join and refresh automatically.
 internal static class BingBongNetworkSync
 {
     /// Human-readable server/sync state shown in the debug overlay.
@@ -51,8 +41,8 @@ internal static class BingBongNetworkSync
     private static int _refreshGeneration = 0;
     private static int _lastSeenRefreshGen = -1;
 
-    /// Starts the HTTP sound-sync server so clients that join can pull .ogg files from this host.
-    /// <returns>void</returns>
+    // Starts the HTTP sound-sync server so clients that join can pull .ogg files from this host.
+    // returns: void
     internal static void StartServer()
     {
         if (_running) return;
@@ -73,8 +63,8 @@ internal static class BingBongNetworkSync
         Plugin.Log.LogInfo($"Sound sync server started. ({StatusText})");
     }
 
-    /// Stops the HTTP sound-sync server.
-    /// <returns>void</returns>
+    // Stops the HTTP sound-sync server.
+    // returns: void
     internal static void StopServer()
     {
         _running = false;
@@ -83,24 +73,24 @@ internal static class BingBongNetworkSync
         StatusText = "idle";
     }
 
-    /// Increments the stop generation counter so connected clients clear their timed subtitle state on the next poll.
-    /// <returns>void</returns>
+    // Increments the stop generation counter so connected clients clear their timed subtitle state on the next poll.
+    // returns: void
     internal static void BroadcastStop()
     {
         Interlocked.Increment(ref _stopGeneration);
     }
 
-    /// Increments the refresh generation counter so connected clients trigger a sound refresh on the next poll.
-    /// <returns>void</returns>
+    // Increments the refresh generation counter so connected clients trigger a sound refresh on the next poll.
+    // returns: void
     internal static void BroadcastRefresh()
     {
         Interlocked.Increment(ref _refreshGeneration);
     }
 
-    /// Uploads a file from the local sounds folder to the host server. Only runs when AllowClientImports is true on the host.
-    /// <param name="fileName">File name (including extension) to upload from the local sounds folder.</param>
-    /// <param name="hostAddress">LAN IP address of the session host.</param>
-    /// <returns>IEnumerator</returns>
+    // Uploads a file from the local sounds folder to the host server. Only runs when AllowClientImports is true on the host.
+    // fileName (string): file name including extension to upload from the local sounds folder
+    // hostAddress (string): LAN IP address of the session host
+    // returns: IEnumerator
     internal static IEnumerator UploadFileToHost(string fileName, string hostAddress)
     {
         string filePath = Path.Combine(Plugin.SoundsFolder, fileName);
@@ -119,13 +109,9 @@ internal static class BingBongNetworkSync
             Plugin.Log.LogWarning($"[Upload] Failed to send '{fileName}': {error}");
     }
 
-    /// 
-    /// Call this from a Harmony patch on the game's player-join event.
-    /// Downloads any sound/subtitle files the client is missing from the host, then
-    /// triggers a sound refresh so the new clips are available immediately.
-    /// 
-    /// <param name="hostAddress">LAN IP address of the session host.</param>
-    /// <returns>void</returns>
+    // Call this from a Harmony patch on the game's player-join event. Downloads missing sound/subtitle files from the host then triggers a refresh.
+    // hostAddress (string): LAN IP address of the session host
+    // returns: void
     internal static void OnPlayerJoined(string hostAddress)
     {
         if (hostAddress == GetLocalIpAddress() || hostAddress == "127.0.0.1") return;
@@ -138,9 +124,9 @@ internal static class BingBongNetworkSync
         }
     }
 
-    /// Registers a newly imported file and starts waiting for all known clients to fetch it.
-    /// <param name="fileName">Imported file name, including extension.</param>
-    /// <returns>void</returns>
+    // Registers a newly imported file and starts waiting for all known clients to fetch it.
+    // fileName (string): imported file name including extension
+    // returns: void
     internal static void RegisterImportedFile(string fileName)
     {
         if (string.IsNullOrWhiteSpace(fileName))
@@ -153,9 +139,9 @@ internal static class BingBongNetworkSync
         }
     }
 
-    /// Returns true when all known clients have acknowledged download of the imported file.
-    /// <param name="fileName">Imported file name, including extension.</param>
-    /// <returns>bool</returns>
+    // Returns true when all known clients have acknowledged download of the imported file.
+    // fileName (string): imported file name including extension
+    // returns: bool
     internal static bool IsImportedFileSynced(string fileName)
     {
         lock (_syncLock)
@@ -172,9 +158,9 @@ internal static class BingBongNetworkSync
         }
     }
 
-    /// Returns count of clients still waiting to download the imported file.
-    /// <param name="fileName">Imported file name, including extension.</param>
-    /// <returns>Count of pending client downloads.</returns>
+    // Returns count of clients still waiting to download the imported file.
+    // fileName (string): imported file name including extension
+    // returns: int - count of pending client downloads
     internal static int GetPendingClientCount(string fileName)
     {
         lock (_syncLock)
@@ -186,8 +172,8 @@ internal static class BingBongNetworkSync
         }
     }
 
-    /// Returns the count of audio files currently available to serve from this host.
-    /// <returns>Count of .ogg and .wav files in the sounds folder.</returns>
+    // Returns the count of audio files currently available to serve from this host.
+    // returns: int - count of .ogg and .wav files in the sounds folder
     internal static int GetServedAudioFileCount()
     {
         try
@@ -198,8 +184,8 @@ internal static class BingBongNetworkSync
         catch (Exception) { return 0; }
     }
 
-    /// Returns per-client download counts as a snapshot.
-    /// <returns>List of (displayName, downloadedFileCount) for each known client.</returns>
+    // Returns per-client download counts as a snapshot.
+    // returns: List<(string displayName, int count)> - downloaded file count per known client
     internal static List<(string displayName, int count)> GetClientDownloadCounts()
     {
         lock (_syncLock)
@@ -215,8 +201,8 @@ internal static class BingBongNetworkSync
         }
     }
 
-    /// Returns imported files still pending download by at least one client.
-    /// <returns>List of (fileName, pendingClientCount) for each pending import.</returns>
+    // Returns imported files still pending download by at least one client.
+    // returns: List<(string fileName, int pending)> - pending import entries
     internal static List<(string fileName, int pending)> GetPendingImports()
     {
         lock (_syncLock)

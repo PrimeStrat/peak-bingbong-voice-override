@@ -3,14 +3,14 @@ using HarmonyLib;
 using UnityEngine;
 namespace BingBongVoiceOverride.Patches;
 
-/// Harmony prefix for AudioSource.PlayOneShot; replaces one-shot audio on Bing Bong objects with a random custom clip routed through the plugin source so it survives drops.
+// Harmony prefix for AudioSource.PlayOneShot; replaces one-shot audio on Bing Bong objects with a random custom clip routed through the plugin source so it survives drops.
 [HarmonyPatch(typeof(AudioSource), nameof(AudioSource.PlayOneShot), new Type[] { typeof(AudioClip) })]
 internal static class BingBongOneShotPatch
 {
-    /// Suppresses the original PlayOneShot and starts a custom clip on the plugin source instead, so playback continues after Bing Bong is dropped.
-    /// <param name="__instance">The AudioSource being patched.</param>
-    /// <param name="clip">The clip passed to PlayOneShot.</param>
-    /// <returns>False to skip the original method when intercepted, otherwise true.</returns>
+    // Suppresses the original PlayOneShot and starts a custom clip on the plugin source instead.
+    // __instance (AudioSource): the AudioSource being patched
+    // clip (AudioClip): the clip passed to PlayOneShot
+    // returns: bool - false to skip the original when intercepted, otherwise true
     [HarmonyPrefix]
     private static bool Prefix(AudioSource __instance, AudioClip clip)
     {
@@ -26,13 +26,13 @@ internal static class BingBongOneShotPatch
     }
 }
 
-/// Harmony prefix for AudioSource.Play; redirects clip-property-based playback on Bing Bong objects to a random custom clip routed through the plugin source so it survives drops.
+// Harmony prefix for AudioSource.Play; redirects clip-property-based playback on Bing Bong objects to a random custom clip routed through the plugin source so it survives drops.
 [HarmonyPatch(typeof(AudioSource), nameof(AudioSource.Play), new Type[] { })]
 internal static class BingBongPlayPatch
 {
-    /// Suppresses the original Play and starts a custom clip on the plugin source instead, so playback continues after Bing Bong is dropped.
-    /// <param name="__instance">The AudioSource being patched.</param>
-    /// <returns>False to skip the original method when intercepted, otherwise true.</returns>
+    // Suppresses the original Play and starts a custom clip on the plugin source instead.
+    // __instance (AudioSource): the AudioSource being patched
+    // returns: bool - false to skip the original when intercepted, otherwise true
     [HarmonyPrefix]
     private static bool Prefix(AudioSource __instance)
     {
@@ -48,7 +48,7 @@ internal static class BingBongPlayPatch
     }
 }
 
-/// Shared helpers used by the Bing Bong audio patches.
+// Shared helpers used by the Bing Bong audio patches.
 internal static class BingBongHelper
 {
     private static readonly string[] BingBongNames =
@@ -59,17 +59,17 @@ internal static class BingBongHelper
         "bingbong",
     };
 
-    /// Returns true when the source or any ancestor game object name matches a known Bing Bong identifier.
-    /// <param name="source">The AudioSource to check.</param>
-    /// <returns>bool</returns>
+    // Returns true when the source or any ancestor game object name matches a known Bing Bong identifier.
+    // source (AudioSource): the AudioSource to check
+    // returns: bool
     internal static bool IsBingBongSource(AudioSource source)
     {
         return FindBingBongRoot(source) != null;
     }
 
-    /// Walks up from a source's transform and returns the highest ancestor whose name matches a known Bing Bong identifier.
-    /// <param name="source">The AudioSource to inspect.</param>
-    /// <returns>The Bing Bong root transform, or null when not a Bing Bong source.</returns>
+    // Walks up from a source's transform and returns the highest ancestor whose name matches a known Bing Bong identifier.
+    // source (AudioSource): the AudioSource to inspect
+    // returns: Transform - the Bing Bong root transform, or null when not a Bing Bong source
     internal static UnityEngine.Transform? FindBingBongRoot(AudioSource source)
     {
         if (source == null) return null;
@@ -91,17 +91,17 @@ internal static class BingBongHelper
         return best;
     }
 
-    /// Returns true when the AudioSource belongs to the plugin's own GameObject (used for music/auto-play).
-    /// <param name="source">The AudioSource to check.</param>
-    /// <returns>bool</returns>
+    // Returns true when the AudioSource belongs to the plugin's own GameObject.
+    // source (AudioSource): the AudioSource to check
+    // returns: bool
     internal static bool IsPluginOwnedSource(AudioSource source)
     {
         if (Plugin.Instance == null) return false;
         return source != null && source.gameObject == Plugin.Instance.gameObject;
     }
 
-    /// Returns the next clip for an override pick: forced clip if set, otherwise a uniformly random enabled clip.
-    /// <returns>AudioClip</returns>
+    // Returns the next clip for an override pick: forced clip if set, otherwise a uniformly random enabled clip.
+    // returns: AudioClip
     internal static AudioClip RandomClip()
     {
         if (!string.IsNullOrEmpty(Plugin.ForcedNextClipName))
@@ -118,9 +118,9 @@ internal static class BingBongHelper
         return active[UnityEngine.Random.Range(0, active.Count)];
     }
 
-    /// Uses the incoming clip when it is one of our managed custom clips; otherwise picks a random enabled custom clip.
-    /// <param name="incoming">Original clip from the Bing Bong source.</param>
-    /// <returns>Custom clip to play.</returns>
+    // Uses the incoming clip when it is one of our managed custom clips; otherwise picks a random enabled custom clip.
+    // incoming (AudioClip): original clip from the Bing Bong source
+    // returns: AudioClip - custom clip to play
     internal static AudioClip PickReplacementClip(AudioClip incoming)
     {
         if (incoming != null)

@@ -5,7 +5,7 @@ using HarmonyLib;
 
 namespace BingBongVoiceOverride.Patches;
 
-/// <summary>Hooks PEAK's session-join events via reflection so the sound sync server starts on the host and clients pull files automatically when joining.</summary>
+// Hooks PEAK's session-join events via reflection so the sound sync server starts on the host and clients pull files automatically when joining.
 internal static class NetworkSyncPatches
 {
     private static bool _applied = false;
@@ -24,9 +24,9 @@ internal static class NetworkSyncPatches
         "OnSessionJoined",
     };
 
-    /// <summary>Attempts to patch PEAK's session-join method using reflection. Falls back silently when types are not found.</summary>
-    /// <param name="harmony">Harmony instance to register patches with.</param>
-    /// <returns>void</returns>
+    // Attempts to patch PEAK's session-join method using reflection. Falls back silently when types are not found.
+    // harmony (Harmony): Harmony instance to register patches with
+    // returns: void
     internal static void TryApply(Harmony harmony)
     {
         if (_applied) return;

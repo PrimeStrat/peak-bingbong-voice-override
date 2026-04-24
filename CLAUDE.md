@@ -4,7 +4,8 @@
 ## C#
 - Fix comments to be properly following generic formats, do not parse it like JS
 - Comments should always remain concise and only placed atop functions
-- Do NOT use XML comments
+- Do NOT use XML comments, use plain text comments
+- Do NOT double space between functions
 
 ## Code Style
 
