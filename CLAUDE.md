@@ -1,6 +1,11 @@
 ## GitHub
 - Never push .env files or anything with sensitve keys
 
+## C#
+- Fix comments to be properly following generic formats, do not parse it like JS
+- Comments should always remain concise and only placed atop functions
+- Do NOT use XML comments
+
 ## Code Style
 
 - Keep all file names appropriately named after the project or relevant function use-cases
