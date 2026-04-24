@@ -42,6 +42,7 @@
       <_StagePlugin Include="$(OutputPath)$(ModName).dll" />
       <_StagePlugin Include="$(OutputPath)$(ModName).pdb" Condition="Exists('$(OutputPath)$(ModName).pdb')" />
       <_StagePlugin Include="$(MSBuildThisFileDirectory)..\assets\fonts\DarumadropOne-Regular.ttf" />
+      <_StagePlugin Include="$(MSBuildThisFileDirectory)..\assets\yt-dlp.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\assets\yt-dlp.exe')" />
       <_StageMeta Include="$(ThunderstoreDir)manifest.json" />
       <_StageMeta Include="$(ThunderstoreDir)README.md" />
       <_StageMeta Include="$(ThunderstoreDir)CHANGELOG.md" Condition="Exists('$(ThunderstoreDir)CHANGELOG.md')" />
@@ -80,6 +81,7 @@
     <MakeDir Directories="$(DeployDir)" />
     <Copy SourceFiles="$(OutputPath)$(ModName).dll" DestinationFolder="$(DeployDir)" />
     <Copy SourceFiles="$(OutputPath)$(ModName).pdb" DestinationFolder="$(DeployDir)" Condition="Exists('$(OutputPath)$(ModName).pdb')" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\assets\yt-dlp.exe" DestinationFolder="$(DeployDir)" Condition="Exists('$(MSBuildThisFileDirectory)..\assets\yt-dlp.exe')" />
     <Copy SourceFiles="$(ThunderstoreDir)icon.png" DestinationFolder="$(DeployDir)" Condition="Exists('$(ThunderstoreDir)icon.png')" />
     <Copy SourceFiles="$(ThunderstoreDir)manifest.json" DestinationFolder="$(DeployDir)" Condition="Exists('$(ThunderstoreDir)manifest.json')" />
     <Copy SourceFiles="$(ThunderstoreDir)README.md" DestinationFolder="$(DeployDir)" Condition="Exists('$(ThunderstoreDir)README.md')" />

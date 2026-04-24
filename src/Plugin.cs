@@ -819,7 +819,7 @@ public class Plugin : BaseUnityPlugin
 
     private IEnumerator LoadCustomClips()
     {
-        string[] extensions = { "*.wav", "*.ogg" };
+        string[] extensions = ["*.wav", "*.ogg"];
         List<string> files = new List<string>();
         foreach (string ext in extensions)
             files.AddRange(Directory.GetFiles(SoundsFolder, ext, SearchOption.TopDirectoryOnly));
@@ -890,6 +890,7 @@ public class Plugin : BaseUnityPlugin
                     Log.LogInfo($"Rewrote {rewritten} live Action_AskBingBong instance(s) with custom responses.");
             }
             BingBongNetworkSync.StartServer();
+            BingBongNetworkSync.BroadcastRefresh();
         }
         else
         {
@@ -922,7 +923,7 @@ public class Plugin : BaseUnityPlugin
 
     /// Creates starter examples in the sounds folder and writes a short README.
     /// <returns>void</returns>
-    private void EnsureExampleFiles()
+    private static void EnsureExampleFiles()
     {
         string readmePath = Path.Combine(SoundsFolder, "README.txt");
         if (!File.Exists(readmePath))
@@ -1086,7 +1087,7 @@ public class Plugin : BaseUnityPlugin
 
         string detectedTitle = string.Empty;
         string outputPath = string.Empty;
-        string[] outLines = stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        string[] outLines = stdout.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
         for (int i = 0; i < outLines.Length; i++)
         {
             string line = outLines[i].Trim();
@@ -1359,11 +1360,11 @@ public class Plugin : BaseUnityPlugin
             return signatureExt;
 
         string contentType = request.GetResponseHeader("Content-Type") ?? string.Empty;
-        if (contentType.IndexOf("ogg", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (contentType.Contains("ogg", StringComparison.OrdinalIgnoreCase))
             return ".ogg";
-        if (contentType.IndexOf("wav", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (contentType.Contains("wav", StringComparison.OrdinalIgnoreCase))
             return ".wav";
-        if (contentType.IndexOf("audio", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (contentType.Contains("audio", StringComparison.OrdinalIgnoreCase))
         {
             string urlExt = Path.GetExtension(uri.AbsolutePath);
             if (urlExt.Equals(".wav", StringComparison.OrdinalIgnoreCase))
@@ -1379,7 +1380,7 @@ public class Plugin : BaseUnityPlugin
     /// Detects container type directly from downloaded bytes.
     /// <param name="data">Downloaded file bytes.</param>
     /// <returns>Detected extension (.ogg/.wav) or empty when unknown.</returns>
-    private string DetectExtensionFromSignature(byte[] data)
+    private static string DetectExtensionFromSignature(byte[] data)
     {
         if (data.Length >= 4 && data[0] == (byte)'O' && data[1] == (byte)'g' && data[2] == (byte)'g' && data[3] == (byte)'S')
             return ".ogg";
@@ -1419,7 +1420,7 @@ public class Plugin : BaseUnityPlugin
     /// Normalizes a raw title into a stable filename-safe base.
     /// <param name="name">Raw title/name string.</param>
     /// <returns>Filename-safe lowercase base name.</returns>
-    private string NormalizeFileName(string name)
+    private static string NormalizeFileName(string name)
     {
         string value = string.IsNullOrWhiteSpace(name) ? "imported_sound" : name.Trim();
         value = Regex.Replace(value, "\\s+", "_");
@@ -1436,7 +1437,7 @@ public class Plugin : BaseUnityPlugin
     /// Extracts a filename from Content-Disposition when present.
     /// <param name="header">Raw Content-Disposition header value.</param>
     /// <returns>Filename text or empty string.</returns>
-    private string TryGetFileNameFromContentDisposition(string header)
+    private static string TryGetFileNameFromContentDisposition(string header)
     {
         if (string.IsNullOrWhiteSpace(header))
             return string.Empty;
@@ -1457,24 +1458,50 @@ public class Plugin : BaseUnityPlugin
     /// <returns>bool</returns>
     private static bool IsYtDlpUrl(string url)
     {
-        return url.IndexOf("youtube.com", StringComparison.OrdinalIgnoreCase) >= 0
-            || url.IndexOf("youtu.be", StringComparison.OrdinalIgnoreCase) >= 0
-            || url.IndexOf("twitch.tv", StringComparison.OrdinalIgnoreCase) >= 0
-            || url.IndexOf("clips.twitch.tv", StringComparison.OrdinalIgnoreCase) >= 0;
+        return url.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("youtu.be", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("twitch.tv", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("clips.twitch.tv", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// Returns the local player's Steam display name, falling back to the OS username.
+    /// <returns>Steam persona name or Environment.UserName.</returns>
+    internal static string GetLocalPlayerName()
+    {
+        try
+        {
+            string[] steamAssemblies = ["com.rlabrecque.steamworks.net", "Steamworks.NET", "Assembly-CSharp"];
+            foreach (string asm in steamAssemblies)
+            {
+                Type? t = Type.GetType($"Steamworks.SteamFriends, {asm}");
+                if (t == null) continue;
+                System.Reflection.MethodInfo? m = t.GetMethod("GetPersonaName",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (m == null) continue;
+                string? name = m.Invoke(null, null) as string;
+                if (!string.IsNullOrWhiteSpace(name))
+                    return name!;
+            }
+        }
+        catch (Exception) { }
+        return Environment.UserName;
     }
 
     /// Finds the yt-dlp executable by checking PATH, the plugin folder, and common install locations.
     /// <returns>Full path to yt-dlp or empty string when not found.</returns>
     private static string FindYtDlp()
     {
+        string pluginDir = Path.GetDirectoryName(typeof(Plugin).Assembly.Location) ?? string.Empty;
         string[] candidates =
-        {
+        [
+            Path.Combine(pluginDir, "yt-dlp.exe"),
+            Path.Combine(pluginDir, "yt-dlp"),
             "yt-dlp",
             "yt-dlp.exe",
             Path.Combine(SoundsFolder, "..", "yt-dlp.exe"),
             Path.Combine(SoundsFolder, "..", "yt-dlp"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "yt-dlp", "yt-dlp.exe"),
-        };
+        ];
 
         foreach (string candidate in candidates)
         {
@@ -1718,7 +1745,7 @@ public class Plugin : BaseUnityPlugin
                 continue;
             }
 
-            string[] parts = line.Split(new[] { "-->" }, StringSplitOptions.None);
+            string[] parts = line.Split(["-->"], StringSplitOptions.None);
             if (parts.Length != 2)
             {
                 i++;
@@ -1765,12 +1792,12 @@ public class Plugin : BaseUnityPlugin
                 int n = r.Read(buf, 0, buf.Length);
                 head = new string(buf, 0, n);
             }
-            if (head.IndexOf("Kind: captions", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (head.Contains("Kind: captions", StringComparison.OrdinalIgnoreCase))
                 return true;
-            if (head.IndexOf("<c>", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (head.Contains("<c>", StringComparison.OrdinalIgnoreCase))
                 return true;
             string name = Path.GetFileName(vttPath);
-            return name.IndexOf(".auto", StringComparison.OrdinalIgnoreCase) >= 0;
+            return name.Contains(".auto", StringComparison.OrdinalIgnoreCase);
         }
         catch (Exception)
         {
@@ -1838,7 +1865,7 @@ public class Plugin : BaseUnityPlugin
     /// Parses a VTT timestamp into seconds.
     /// <param name="value">Raw VTT time segment.</param>
     /// <returns>Time in seconds, or -1 when invalid.</returns>
-    private float ParseVttTime(string value)
+    private static float ParseVttTime(string value)
     {
         string t = value.Trim();
         int space = t.IndexOf(' ');
@@ -1880,7 +1907,7 @@ public class Plugin : BaseUnityPlugin
     /// Escapes a string for JSON output.
     /// <param name="value">Input string to escape.</param>
     /// <returns>JSON-safe escaped string.</returns>
-    private string EscapeJson(string value)
+    private static string EscapeJson(string value)
     {
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
@@ -1889,7 +1916,7 @@ public class Plugin : BaseUnityPlugin
     /// <returns>Bing Bong transform when found; otherwise null.</returns>
     private static UnityEngine.Transform? FindBingBongTransform()
     {
-        string[] names = { "BingBong", "Bing Bong", "bing_bong", "bingbong" };
+        string[] names = ["BingBong", "Bing Bong", "bing_bong", "bingbong"];
         for (int i = 0; i < names.Length; i++)
         {
             GameObject go = GameObject.Find(names[i]);
@@ -1910,7 +1937,7 @@ public class Plugin : BaseUnityPlugin
     /// <param name="query">URI query string beginning with '?' or empty.</param>
     /// <param name="key">Query key to locate.</param>
     /// <returns>Decoded value or empty string.</returns>
-    private string TryGetQueryValue(string query, string key)
+    private static string TryGetQueryValue(string query, string key)
     {
         if (string.IsNullOrWhiteSpace(query) || string.IsNullOrWhiteSpace(key))
             return string.Empty;
@@ -1922,7 +1949,7 @@ public class Plugin : BaseUnityPlugin
             if (string.IsNullOrWhiteSpace(pair))
                 continue;
 
-            string[] parts = pair.Split(new[] { '=' }, 2);
+            string[] parts = pair.Split(['='], 2);
             string pairKey = Uri.UnescapeDataString(parts[0]).Trim();
             if (!pairKey.Equals(key, StringComparison.OrdinalIgnoreCase))
                 continue;

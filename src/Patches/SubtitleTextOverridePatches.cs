@@ -8,11 +8,11 @@ namespace BingBongVoiceOverride.Patches;
 /// Patches common Unity text setters so active Bing Bong subtitle overrides can replace the game's default subtitle line.
 internal static class SubtitleTextOverridePatches
 {
-    private static readonly List<object> TrackedTargets = new List<object>();
-    private static readonly HashSet<int> StyleCapturedIds = new HashSet<int>();
-    private static readonly Dictionary<int, bool> SubtitleTargetCache = new Dictionary<int, bool>();
-    private static readonly string[] SubtitleHierarchyKeywords = { "subtitle", "caption", "sing" };
-    private static readonly string[] SubtitleHierarchyExcludeKeywords = { "button", "btn", "label", "header", "title", "tooltip", "icon", "name", "score", "time", "hp", "health", "stamina", "chat", "version" };
+    private static readonly List<object> TrackedTargets = [];
+    private static readonly HashSet<int> StyleCapturedIds = [];
+    private static readonly Dictionary<int, bool> SubtitleTargetCache = [];
+    private static readonly string[] SubtitleHierarchyKeywords = ["subtitle", "caption", "sing"];
+    private static readonly string[] SubtitleHierarchyExcludeKeywords = ["button", "btn", "label", "header", "title", "tooltip", "icon", "name", "score", "time", "hp", "health", "stamina", "chat", "version"];
     private static bool _internalWrite = false;
 
     /// End time (unscaledTime) of the current discovery window during which any text setter write is treated as a candidate Bing Bong subtitle target.

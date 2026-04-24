@@ -6,7 +6,6 @@ using System.Net;
 using System.Text;
 using System.Threading;
 using UnityEngine;
-using UnityEngine.Networking;
 namespace BingBongVoiceOverride;
 
 /// 
@@ -37,14 +36,20 @@ internal static class BingBongNetworkSync
     private static HttpListener? _listener;
     private static Thread? _serverThread;
     private static bool _running = false;
-    private static readonly object _syncLock = new object();
-    private static readonly HashSet<string> _knownClients = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private static readonly object _syncLock = new();
+    private static readonly HashSet<string> _knownClients = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, HashSet<string>> _pendingImportedFileClients =
-        new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, HashSet<string>> _clientDownloadedFiles =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, string> _clientDisplayNames =
+        new(StringComparer.OrdinalIgnoreCase);
     private static string _activeHostAddress = string.Empty;
     private static bool _clientAutoSyncRunning = false;
     private static int _stopGeneration = 0;
     private static int _lastSeenStopGen = -1;
+    private static int _refreshGeneration = 0;
+    private static int _lastSeenRefreshGen = -1;
 
     /// Starts the HTTP sound-sync server so clients that join can pull .ogg files from this host.
     /// <returns>void</returns>
@@ -85,6 +90,13 @@ internal static class BingBongNetworkSync
         Interlocked.Increment(ref _stopGeneration);
     }
 
+    /// Increments the refresh generation counter so connected clients trigger a sound refresh on the next poll.
+    /// <returns>void</returns>
+    internal static void BroadcastRefresh()
+    {
+        Interlocked.Increment(ref _refreshGeneration);
+    }
+
     /// Uploads a file from the local sounds folder to the host server. Only runs when AllowClientImports is true on the host.
     /// <param name="fileName">File name (including extension) to upload from the local sounds folder.</param>
     /// <param name="hostAddress">LAN IP address of the session host.</param>
@@ -96,17 +108,15 @@ internal static class BingBongNetworkSync
 
         byte[] data = File.ReadAllBytes(filePath);
         string url = $"http://{hostAddress}:28472/bingbong/upload?name={Uri.EscapeDataString(fileName)}";
-        UnityWebRequest req = new UnityWebRequest(url, "POST");
-        req.uploadHandler = new UploadHandlerRaw(data);
-        req.downloadHandler = new DownloadHandlerBuffer();
-        req.SetRequestHeader("Content-Type", "application/octet-stream");
-        yield return req.SendWebRequest();
+        string localName = Plugin.GetLocalPlayerName();
+        bool success = false;
+        string? error = null;
+        yield return NetPost(url, data, "application/octet-stream", localName, (ok, err) => { success = ok; error = err; });
 
-        if (req.result == UnityWebRequest.Result.Success)
+        if (success)
             Plugin.Log.LogInfo($"[Upload] Sent '{fileName}' to host.");
         else
-            Plugin.Log.LogWarning($"[Upload] Failed to send '{fileName}': {req.error}");
-        req.Dispose();
+            Plugin.Log.LogWarning($"[Upload] Failed to send '{fileName}': {error}");
     }
 
     /// 
@@ -138,7 +148,7 @@ internal static class BingBongNetworkSync
 
         lock (_syncLock)
         {
-            HashSet<string> waiting = new HashSet<string>(_knownClients, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> waiting = new(_knownClients, StringComparer.OrdinalIgnoreCase);
             _pendingImportedFileClients[fileName] = waiting;
         }
     }
@@ -176,6 +186,48 @@ internal static class BingBongNetworkSync
         }
     }
 
+    /// Returns the count of audio files currently available to serve from this host.
+    /// <returns>Count of .ogg and .wav files in the sounds folder.</returns>
+    internal static int GetServedAudioFileCount()
+    {
+        try
+        {
+            return Directory.GetFiles(Plugin.SoundsFolder, "*.ogg", SearchOption.TopDirectoryOnly).Length
+                 + Directory.GetFiles(Plugin.SoundsFolder, "*.wav", SearchOption.TopDirectoryOnly).Length;
+        }
+        catch (Exception) { return 0; }
+    }
+
+    /// Returns per-client download counts as a snapshot.
+    /// <returns>List of (displayName, downloadedFileCount) for each known client.</returns>
+    internal static List<(string displayName, int count)> GetClientDownloadCounts()
+    {
+        lock (_syncLock)
+        {
+            List<(string, int)> result = new(_knownClients.Count);
+            foreach (string ip in _knownClients)
+            {
+                string name = _clientDisplayNames.TryGetValue(ip, out string n) && !string.IsNullOrWhiteSpace(n) ? n : ip;
+                int c = _clientDownloadedFiles.TryGetValue(ip, out HashSet<string> f) ? f.Count : 0;
+                result.Add((name, c));
+            }
+            return result;
+        }
+    }
+
+    /// Returns imported files still pending download by at least one client.
+    /// <returns>List of (fileName, pendingClientCount) for each pending import.</returns>
+    internal static List<(string fileName, int pending)> GetPendingImports()
+    {
+        lock (_syncLock)
+        {
+            List<(string, int)> result = new();
+            foreach (KeyValuePair<string, HashSet<string>> kv in _pendingImportedFileClients)
+                if (kv.Value.Count > 0) result.Add((kv.Key, kv.Value.Count));
+            return result;
+        }
+    }
+
     private static bool TryBind(string prefix)
     {
         try
@@ -198,20 +250,21 @@ internal static class BingBongNetworkSync
         StatusText = $"syncing from {hostAddress}";
         Plugin.Log.LogInfo($"Fetching sound list from host {hostAddress}...");
 
-        UnityWebRequest listReq = UnityWebRequest.Get($"http://{hostAddress}:28472/bingbong/list");
-        yield return listReq.SendWebRequest();
+        string localName = Plugin.GetLocalPlayerName();
+        byte[]? listBytes = null;
+        string? listError = null;
+        yield return NetGet($"http://{hostAddress}:28472/bingbong/list", localName,
+            (b, e) => { listBytes = b; listError = e; });
 
-        if (listReq.result != UnityWebRequest.Result.Success)
+        if (listBytes == null)
         {
             StatusText = "sync failed";
-            Plugin.Log.LogWarning($"Could not reach host sound server: {listReq.error}");
-            listReq.Dispose();
+            Plugin.Log.LogWarning($"Could not reach host sound server: {listError}");
             yield break;
         }
 
-        string[] fileNames = listReq.downloadHandler.text.Split(
-            new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-        listReq.Dispose();
+        string[] fileNames = Encoding.UTF8.GetString(listBytes)
+            .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
         int downloaded = 0;
         long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
@@ -245,21 +298,21 @@ internal static class BingBongNetworkSync
             string destPath = Path.Combine(Plugin.SoundsFolder, name);
             if (File.Exists(destPath)) continue;
 
-            UnityWebRequest fileReq = UnityWebRequest.Get(
-                $"http://{hostAddress}:28472/bingbong/file/{Uri.EscapeDataString(name)}");
-            yield return fileReq.SendWebRequest();
+            byte[]? fileBytes = null;
+            string? fileError = null;
+            yield return NetGet(
+                $"http://{hostAddress}:28472/bingbong/file/{Uri.EscapeDataString(name)}",
+                localName, (b, e) => { fileBytes = b; fileError = e; });
 
-            if (fileReq.result != UnityWebRequest.Result.Success)
+            if (fileBytes == null)
             {
-                Plugin.Log.LogWarning($"Failed to download '{name}': {fileReq.error}");
-                fileReq.Dispose();
+                Plugin.Log.LogWarning($"Failed to download '{name}': {fileError}");
                 continue;
             }
 
-            File.WriteAllBytes(destPath, fileReq.downloadHandler.data);
+            File.WriteAllBytes(destPath, fileBytes);
             Plugin.Log.LogInfo($"  Synced: {name}");
             downloaded++;
-            fileReq.Dispose();
         }
 
         StatusText = downloaded > 0 ? $"synced {downloaded} file(s)" : "in sync";
@@ -272,20 +325,16 @@ internal static class BingBongNetworkSync
 
     private static IEnumerator SyncSelectionFromHost(string hostAddress)
     {
-        UnityWebRequest req = UnityWebRequest.Get(
-            $"http://{hostAddress}:28472/bingbong/file/{Uri.EscapeDataString("selection.json")}");
-        yield return req.SendWebRequest();
+        byte[]? bytes = null;
+        yield return NetGet(
+            $"http://{hostAddress}:28472/bingbong/file/{Uri.EscapeDataString("selection.json")}",
+            Plugin.GetLocalPlayerName(), (b, _) => { bytes = b; });
 
-        if (req.result != UnityWebRequest.Result.Success)
-        {
-            req.Dispose();
-            yield break;
-        }
+        if (bytes == null) yield break;
 
         try
         {
-            string raw = req.downloadHandler.text;
-            req.Dispose();
+            string raw = Encoding.UTF8.GetString(bytes);
             System.Text.RegularExpressions.MatchCollection matches =
                 System.Text.RegularExpressions.Regex.Matches(
                     raw, "\"(?<k>(?:\\\\.|[^\"])+)\"\\s*:\\s*(?<v>true|false)");
@@ -300,6 +349,50 @@ internal static class BingBongNetworkSync
         {
             Plugin.Log.LogWarning($"[Sync] selection.json parse failed: {ex.Message}");
         }
+    }
+
+    private static IEnumerator NetGet(string url, string playerName, Action<byte[]?, string?> onDone)
+    {
+        byte[]? result = null;
+        string? error = null;
+        bool done = false;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                using System.Net.WebClient wc = new System.Net.WebClient();
+                if (!string.IsNullOrEmpty(playerName))
+                    wc.Headers["X-Player-Name"] = playerName;
+                result = wc.DownloadData(url);
+            }
+            catch (Exception ex) { error = ex.Message; }
+            finally { done = true; }
+        });
+        while (!done) yield return null;
+        onDone(result, error);
+    }
+
+    private static IEnumerator NetPost(string url, byte[] data, string contentType, string playerName, Action<bool, string?> onDone)
+    {
+        bool success = false;
+        string? error = null;
+        bool done = false;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                using System.Net.WebClient wc = new System.Net.WebClient();
+                wc.Headers["Content-Type"] = contentType;
+                if (!string.IsNullOrEmpty(playerName))
+                    wc.Headers["X-Player-Name"] = playerName;
+                wc.UploadData(url, "POST", data);
+                success = true;
+            }
+            catch (Exception ex) { error = ex.Message; }
+            finally { done = true; }
+        });
+        while (!done) yield return null;
+        onDone(success, error);
     }
 
     private static IEnumerator ClientAutoSyncLoop()
@@ -317,17 +410,13 @@ internal static class BingBongNetworkSync
 
     private static IEnumerator FetchHostStatus(string hostAddress)
     {
-        UnityWebRequest req = UnityWebRequest.Get($"http://{hostAddress}:28472/bingbong/status");
-        yield return req.SendWebRequest();
+        byte[]? bytes = null;
+        yield return NetGet($"http://{hostAddress}:28472/bingbong/status",
+            Plugin.GetLocalPlayerName(), (b, _) => { bytes = b; });
 
-        if (req.result != UnityWebRequest.Result.Success)
-        {
-            req.Dispose();
-            yield break;
-        }
+        if (bytes == null) yield break;
 
-        string body = req.downloadHandler.text;
-        req.Dispose();
+        string body = Encoding.UTF8.GetString(bytes);
 
         int stopGen = ParseJsonInt(body, "stopGen", -1);
         if (stopGen >= 0)
@@ -335,6 +424,14 @@ internal static class BingBongNetworkSync
             if (_lastSeenStopGen >= 0 && stopGen != _lastSeenStopGen)
                 Plugin.ClearTimedSubtitles();
             _lastSeenStopGen = stopGen;
+        }
+
+        int refreshGen = ParseJsonInt(body, "refreshGen", -1);
+        if (refreshGen >= 0)
+        {
+            if (_lastSeenRefreshGen >= 0 && refreshGen != _lastSeenRefreshGen)
+                Plugin.Instance?.StartRefresh();
+            _lastSeenRefreshGen = refreshGen;
         }
 
         int allowImports = ParseJsonInt(body, "allowClientImports", 0);
@@ -364,7 +461,8 @@ internal static class BingBongNetworkSync
         {
             string path = context.Request.Url.AbsolutePath;
             string requesterIp = context.Request.RemoteEndPoint?.Address.ToString() ?? string.Empty;
-            TrackClient(requesterIp);
+            string playerName = context.Request.Headers["X-Player-Name"] ?? string.Empty;
+            TrackClient(requesterIp, playerName);
             if (path.EndsWith("/list", StringComparison.OrdinalIgnoreCase))
                 ServeFileList(context);
             else if (path.EndsWith("/status", StringComparison.OrdinalIgnoreCase))
@@ -389,7 +487,7 @@ internal static class BingBongNetworkSync
     private static void ServeStatus(HttpListenerContext context)
     {
         int allowImports = Plugin.AllowClientImports != null && Plugin.AllowClientImports.Value ? 1 : 0;
-        string json = $"{{\"stopGen\":{_stopGeneration},\"allowClientImports\":{allowImports}}}";
+        string json = $"{{\"stopGen\":{_stopGeneration},\"refreshGen\":{_refreshGeneration},\"allowClientImports\":{allowImports}}}";
         byte[] bytes = System.Text.Encoding.UTF8.GetBytes(json);
         context.Response.ContentType = "application/json";
         context.Response.ContentLength64 = bytes.Length;
@@ -436,7 +534,7 @@ internal static class BingBongNetworkSync
         {
             using System.IO.Stream body = context.Request.InputStream;
             byte[] data;
-            using (System.IO.MemoryStream ms = new System.IO.MemoryStream())
+            using (System.IO.MemoryStream ms = new())
             {
                 body.CopyTo(ms);
                 data = ms.ToArray();
@@ -462,8 +560,7 @@ internal static class BingBongNetworkSync
         long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
         string[] oggFiles = Directory.GetFiles(Plugin.SoundsFolder, "*.ogg", SearchOption.TopDirectoryOnly);
         string[] wavFiles = Directory.GetFiles(Plugin.SoundsFolder, "*.wav", SearchOption.TopDirectoryOnly);
-        string[] jsonFiles = Directory.GetFiles(Plugin.SoundsFolder, "*.json", SearchOption.TopDirectoryOnly);
-        System.Collections.Generic.List<string> lines = new System.Collections.Generic.List<string>();
+        System.Collections.Generic.List<string> lines = new();
         foreach (string f in oggFiles)
         {
             long size = new FileInfo(f).Length;
@@ -474,11 +571,6 @@ internal static class BingBongNetworkSync
         {
             long size = new FileInfo(f).Length;
             if (size > maxBytes) continue;
-            lines.Add($"{Path.GetFileName(f)}|{size}");
-        }
-        foreach (string f in jsonFiles)
-        {
-            long size = new FileInfo(f).Length;
             lines.Add($"{Path.GetFileName(f)}|{size}");
         }
         string body = string.Join("\n", lines.ToArray());
@@ -509,6 +601,14 @@ internal static class BingBongNetworkSync
         }
 
         string ext = Path.GetExtension(filePath).ToLowerInvariant();
+
+        if (ext == ".json" && !fileName.Equals("selection.json", StringComparison.OrdinalIgnoreCase))
+        {
+            context.Response.StatusCode = 403;
+            context.Response.Close();
+            return;
+        }
+
         long maxBytes = Math.Max(64L, Plugin.MaxSyncFileSizeKb.Value) * 1024L;
         long fileSize = new FileInfo(filePath).Length;
         if ((ext == ".ogg" || ext == ".wav") && fileSize > maxBytes)
@@ -520,6 +620,8 @@ internal static class BingBongNetworkSync
 
         byte[] bytes = File.ReadAllBytes(filePath);
         AcknowledgeDownloadedByClient(fileName, requesterIp);
+        if (ext == ".ogg" || ext == ".wav")
+            RecordClientDownload(fileName, requesterIp);
         if (ext == ".json")
             context.Response.ContentType = "application/json";
         else if (ext == ".wav")
@@ -531,7 +633,27 @@ internal static class BingBongNetworkSync
         context.Response.Close();
     }
 
-    private static void TrackClient(string requesterIp)
+    private static void RecordClientDownload(string fileName, string requesterIp)
+    {
+        if (string.IsNullOrWhiteSpace(requesterIp)) return;
+        string displayName;
+        int fileCount;
+        lock (_syncLock)
+        {
+            HashSet<string> clientFiles;
+            if (!_clientDownloadedFiles.TryGetValue(requesterIp, out clientFiles))
+            {
+                clientFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _clientDownloadedFiles[requesterIp] = clientFiles;
+            }
+            clientFiles.Add(fileName);
+            fileCount = clientFiles.Count;
+            displayName = _clientDisplayNames.TryGetValue(requesterIp, out string n) && !string.IsNullOrWhiteSpace(n) ? n : requesterIp;
+        }
+        Plugin.Log.LogInfo($"[Sync] {displayName} downloaded '{fileName}' (now has {fileCount} file(s) from this host)");
+    }
+
+    private static void TrackClient(string requesterIp, string playerName)
     {
         if (string.IsNullOrWhiteSpace(requesterIp) || requesterIp == "127.0.0.1" || requesterIp == "::1")
             return;
@@ -541,6 +663,8 @@ internal static class BingBongNetworkSync
         lock (_syncLock)
         {
             _knownClients.Add(requesterIp);
+            if (!string.IsNullOrWhiteSpace(playerName))
+                _clientDisplayNames[requesterIp] = playerName;
         }
     }
 

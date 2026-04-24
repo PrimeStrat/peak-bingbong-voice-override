@@ -347,6 +347,25 @@ internal class UnifiedMenu : MonoBehaviour
         {
             Plugin.AllowClientImports.Value = GUILayout.Toggle(Plugin.AllowClientImports.Value,
                 "  Allow any client to upload new sounds to this host");
+
+            GUILayout.Space(4f);
+            List<(string ip, int count)> clientCounts = BingBongNetworkSync.GetClientDownloadCounts();
+            int servedFiles = BingBongNetworkSync.GetServedAudioFileCount();
+            GUILayout.Label($"Known clients: {clientCounts.Count}  (serving {servedFiles} audio file(s))");
+            foreach ((string ip, int count) in clientCounts)
+            {
+                string syncTag = servedFiles > 0 && count >= servedFiles ? " [synced]" : $" [{count}/{servedFiles} files]";
+                GUILayout.Label($"  {ip}{syncTag}");
+            }
+
+            List<(string fileName, int pending)> pendingImports = BingBongNetworkSync.GetPendingImports();
+            if (pendingImports.Count > 0)
+            {
+                GUILayout.Space(4f);
+                GUILayout.Label("Waiting for clients to download:");
+                foreach ((string fileName, int pending) in pendingImports)
+                    GUILayout.Label($"  {fileName}  --  {pending} client(s) remaining");
+            }
         }
         else if (!string.IsNullOrEmpty(BingBongNetworkSync.ActiveHostAddress))
         {
@@ -354,6 +373,7 @@ internal class UnifiedMenu : MonoBehaviour
                 ? "Host allows client imports: YES"
                 : "Host allows client imports: NO (host must enable AllowClientImports)";
             GUILayout.Label(importLabel);
+            GUILayout.Label($"Host: {BingBongNetworkSync.ActiveHostAddress}  |  Local clips loaded: {Plugin.CustomClips.Count}");
         }
 
         GUILayout.Space(6f);
