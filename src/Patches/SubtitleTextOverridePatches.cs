@@ -104,7 +104,7 @@ internal static class SubtitleTextOverridePatches
         }
     }
 
-    // Opens a short discovery window during which any text setter write is captured as a candidate subtitle target. Called by Plugin.OnClipPlayed.
+    // Opens a short discovery window during which any text setter write is captured as a candidate subtitle target.
     // durationSeconds (float): how long the window stays open
     // returns: void
     internal static void BeginDiscoveryWindow(float durationSeconds)
@@ -115,7 +115,7 @@ internal static class SubtitleTextOverridePatches
             _discoverUntil = end;
     }
 
-    // Drives per-frame override behavior; pushes active subtitle into native UI or blanks it for timed subtitle mode.
+    // Drives per-frame subtitle override behavior; pushes active subtitle into tracked native UI.
     // returns: void
     internal static void TickForceActiveSubtitle()
     {
@@ -213,32 +213,6 @@ internal static class SubtitleTextOverridePatches
     private static bool IsCandidateSubtitleTarget(object target)
     {
         return IsBingBongSubtitleTarget(target);
-    }
-
-    private static bool PassesExcludeFilter(object target)
-    {
-        Component? c = target as Component;
-        if (c == null)
-            return false;
-        try
-        {
-            UnityEngine.Transform t = c.transform;
-            while (t != null)
-            {
-                string name = t.gameObject.name;
-                for (int i = 0; i < SubtitleHierarchyExcludeKeywords.Length; i++)
-                {
-                    if (name.IndexOf(SubtitleHierarchyExcludeKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0)
-                        return false;
-                }
-                t = t.parent;
-            }
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-        return true;
     }
 
     private static bool IsBingBongSubtitleTarget(object target)

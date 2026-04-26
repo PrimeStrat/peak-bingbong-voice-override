@@ -3,13 +3,10 @@ using HarmonyLib;
 using UnityEngine;
 namespace BingBongVoiceOverride.Patches;
 
-// Mirrors BingBongVoiceLineAPI's discovery hooks so we catch every Action_AskBingBong instance the moment it enters the scene and rewrite its responses to point at our clips.
+// Catches Action_AskBingBong on any Object.Instantiate call and rewrites its responses.
 [HarmonyPatch(typeof(UnityEngine.Object))]
 internal static class AskBingBongInstantiateDiscoveryPatch
 {
-    // Postfix on Object.Instantiate; walks the result for Action_AskBingBong and triggers a response rewrite.
-    // __result (UnityEngine.Object): the newly instantiated Unity object
-    // returns: void
     [HarmonyPatch(typeof(UnityEngine.Object), nameof(UnityEngine.Object.Instantiate), new Type[] { typeof(UnityEngine.Object) })]
     [HarmonyPostfix]
     private static void InstantiatePostfix(UnityEngine.Object __result)
@@ -19,14 +16,10 @@ internal static class AskBingBongInstantiateDiscoveryPatch
     }
 }
 
-// Catches Action_AskBingBong components added via GameObject.AddComponent so freshly composed Bing Bong objects are also rewritten.
+// Catches Action_AskBingBong added via GameObject.AddComponent and rewrites its responses.
 [HarmonyPatch(typeof(GameObject))]
 internal static class AskBingBongAddComponentDiscoveryPatch
 {
-    // Postfix on AddComponent(Type); rewrites responses when an Action_AskBingBong was added.
-    // __instance (GameObject): the GameObject the component was added to
-    // __result (Component): the created component
-    // returns: void
     [HarmonyPatch(nameof(GameObject.AddComponent), new Type[] { typeof(Type) })]
     [HarmonyPostfix]
     private static void AddComponentPostfix(GameObject __instance, ref Component __result)
@@ -36,11 +29,11 @@ internal static class AskBingBongAddComponentDiscoveryPatch
     }
 }
 
-// Shared helpers for the Action_AskBingBong discovery patches.
+// Shared discovery helper used by both AskBingBong patches.
 internal static class AskBingBongDiscoveryHelper
 {
-    // Locates an Action_AskBingBong component on the given object or its descendants and rewrites its responses array.
-    // created (UnityEngine.Object): a freshly instantiated or composed Unity object
+    // Locates an Action_AskBingBong component on the given object and rewrites its response array.
+    // created (UnityEngine.Object): freshly instantiated or composed Unity object
     // returns: void
     internal static void TryHandle(UnityEngine.Object created)
     {

@@ -73,7 +73,12 @@ internal static class BingBongNetworkSync
     internal static bool ClientAllowSubtitleEdit = false;
     internal static bool ClientAllowSelectionEdit = false;
     internal static bool ClientAllowSettingsChange = false;
-    internal static bool ClientAllowMenu = true;
+    // Defaults to false so clients are blocked until SIG_PERMISSIONS arrives from the host.
+    internal static bool ClientAllowMenu = false;
+
+    // Set when the client receives the first SIG_PERMISSIONS from the host; confirms the host has the mod.
+    // Without this, clients in rooms where the host lacks the mod would be permanently menu-blocked.
+    internal static bool HostModPresent = false;
 
     private static readonly object _syncLock = new();
 
@@ -156,6 +161,12 @@ internal static class BingBongNetworkSync
         _running = false;
         _hostJoined = false;
         _hasReachedHost = false;
+        HostModPresent = false;
+        ClientAllowPlayback = false;
+        ClientAllowSubtitleEdit = false;
+        ClientAllowSelectionEdit = false;
+        ClientAllowSettingsChange = false;
+        ClientAllowMenu = false;
         StatusText = "idle";
         Patches.PhotonNet.Unsubscribe();
         DisposeIncomingChunkWriters();
@@ -828,6 +839,7 @@ internal static class BingBongNetworkSync
             case SIG_PERMISSIONS:
                 if (bytes.Length >= 2)
                 {
+                    HostModPresent = true;
                     byte perms = bytes[1];
                     ClientAllowPlayback = (perms & 1) != 0;
                     ClientAllowSubtitleEdit = (perms & 2) != 0;

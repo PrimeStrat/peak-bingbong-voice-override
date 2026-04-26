@@ -13,17 +13,12 @@ internal static class NetworkSyncPatches
     private static bool _applied = false;
 
     // True when the local player clicked Play to create the lobby. Set from MainMenuMainPage.PlayClicked
-    // because PhotonNetwork.IsMasterClient is unreliable inside PlayerConnectionLog callbacks (PEAK quirk;
-    // documented by PEAKUnlimited's PlayClickedPatch). Cleared when leaving the room.
+    // because PhotonNetwork.IsMasterClient is unreliable inside PlayerConnectionLog callbacks.
     internal static bool LocalPlayerCreatedLobby = false;
 
-    // One-shot guard: OnJoinedRoom is fired by PEAK on every frame while in a room, not just once.
-    // Cleared by OnLeftRoomPostfix so the next session starts fresh.
-    private static bool _joinedRoomHandled = false;
+    // True while the local player is inside a Photon room. Set in OnJoinedRoom; cleared in OnLeftRoom.
+    internal static bool IsInRoom = false;
 
-    // Attempts to patch PEAK's PlayerConnectionLog for Photon player join/leave detection.
-    // harmony (Harmony): Harmony instance to register patches with
-    // returns: void
     internal static void TryApply(Harmony harmony)
     {
         if (_applied) return;
@@ -67,8 +62,6 @@ internal static class NetworkSyncPatches
         }
     }
 
-    // Postfix fired when another player enters the Photon room.
-    // __0 (object): Photon.Realtime.Player instance injected by Harmony
     private static void OnPlayerEnteredRoomPostfix(object __0)
     {
         try
@@ -89,8 +82,6 @@ internal static class NetworkSyncPatches
         }
     }
 
-    // Postfix fired when a player leaves the Photon room.
-    // __0 (object): Photon.Realtime.Player instance injected by Harmony
     private static void OnPlayerLeftRoomPostfix(object __0)
     {
         try
@@ -105,27 +96,24 @@ internal static class NetworkSyncPatches
         }
     }
 
-    // Postfix fired when the local player joins a Photon room.
-    // PhotonNetwork.IsMasterClient cannot be trusted here (PEAK quirk: it returns false even for the
-    // lobby creator), so we use LocalPlayerCreatedLobby - set by the MainMenuMainPage.PlayClicked patch -
-    // as the source of truth for who is hosting. Also, PEAK calls OnJoinedRoom every frame while in a
-    // room, so _joinedRoomHandled gates this to fire exactly once per session.
+    // IsMasterClient is unreliable inside join callbacks; use LocalPlayerCreatedLobby as the host signal.
     private static void OnJoinedRoomPostfix()
     {
-        if (_joinedRoomHandled) return;
-        _joinedRoomHandled = true;
+        IsInRoom = true;
         try
         {
-            bool isHost = LocalPlayerCreatedLobby;
-            Plugin.Log.LogInfo($"[NetworkSync] Local player joined room. LocalCreatedLobby={isHost} (PhotonIsMaster={PhotonBridge.IsMasterClient}, ignored)");
-            if (isHost)
+            if (LocalPlayerCreatedLobby)
             {
+                if (BingBongNetworkSync.IsHosting) return;
+                Plugin.Log.LogInfo($"[NetworkSync] Local player joined room as host.");
                 BingBongNetworkSync.StartServer();
                 foreach (string name in PhotonBridge.GetOtherPlayerNames())
                     BingBongNetworkSync.OnPhotonPlayerJoined(name);
             }
             else
             {
+                if (BingBongNetworkSync.IsConnectedAsClient) return;
+                Plugin.Log.LogInfo($"[NetworkSync] Local player joined room as client.");
                 BingBongNetworkSync.OnPlayerJoined(string.Empty);
                 UnifiedMenu.JoinToastUntil = UnityEngine.Time.unscaledTime + 8f;
             }
@@ -136,19 +124,14 @@ internal static class NetworkSyncPatches
         }
     }
 
-    // Postfix fired when the local player leaves the Photon room. Resets the host-intent flag
-    // so a subsequent join (e.g. joining someone else's lobby) does not incorrectly host again.
     private static void OnLeftRoomPostfix()
     {
         LocalPlayerCreatedLobby = false;
-        _joinedRoomHandled = false;
+        IsInRoom = false;
         Plugin.Log.LogInfo("[NetworkSync] Left room; cleared LocalPlayerCreatedLobby.");
         BingBongNetworkSync.StopServer();
     }
 
-    // Postfix fired when the local player clicks Play in the main menu. PEAK uses this entry point
-    // to create the multiplayer lobby, so this is the only reliable signal that this player will be
-    // the lobby host once the room comes up.
     private static void PlayClickedPostfix()
     {
         LocalPlayerCreatedLobby = true;
@@ -159,7 +142,7 @@ internal static class NetworkSyncPatches
     // returns: string
     internal static string GetLocalPhotonNickName() => PhotonBridge.GetLocalNickName();
 
-    // Reflection-based access to Photon PUN runtime types without a hard DLL dependency.
+    // Reflection-based Photon PUN access without a hard DLL dependency.
     private static class PhotonBridge
     {
         private static Type? _pnType;
@@ -172,11 +155,8 @@ internal static class NetworkSyncPatches
             return AccessTools.Property(t, name)?.GetValue(null);
         }
 
-        // True when the local player is the Photon master client.
         internal static bool IsMasterClient => (bool)(GetProp("IsMasterClient") ?? false);
 
-        // Returns the local player's Photon NickName, or empty string if unavailable.
-        // returns: string
         internal static string GetLocalNickName()
         {
             object? local = GetProp("LocalPlayer");
@@ -184,9 +164,6 @@ internal static class NetworkSyncPatches
             return AccessTools.Property(local.GetType(), "NickName")?.GetValue(local) as string ?? string.Empty;
         }
 
-        // Extracts NickName from a Photon.Realtime.Player object via reflection.
-        // player (object): Photon Player injected by Harmony
-        // returns: string
         internal static string GetNickName(object? player)
         {
             if (player == null) return string.Empty;
@@ -220,7 +197,7 @@ internal static class NetworkSyncPatches
             return names;
         }
 
-        // Sets a string value on the current Photon room's custom properties.
+        // Sets a string on the current Photon room's custom properties.
         // key (string): property key
         // value (string): property value
         // returns: void
@@ -253,7 +230,7 @@ internal static class NetworkSyncPatches
             Plugin.Log.LogWarning("[NetworkSync] SetCustomProperties overload not found on Room type.");
         }
 
-        // Reads a string value from the current Photon room's custom properties.
+        // Reads a string from the current Photon room's custom properties.
         // key (string): property key
         // returns: string?
         internal static string? GetRoomProperty(string key)
@@ -299,10 +276,6 @@ internal static class PhotonNet
     private static MemberInfo? _evCustomDataMember;
     private static MemberInfo? _evSenderMember;
 
-    // Returns the field or property accessor for the given member name on a type.
-    // t (Type): type to inspect
-    // name (string): member name
-    // returns: MemberInfo? - the FieldInfo or PropertyInfo, or null if missing
     private static MemberInfo? FindMember(Type t, string name)
     {
         BindingFlags flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic;
@@ -311,10 +284,6 @@ internal static class PhotonNet
         return t.GetProperty(name, flags);
     }
 
-    // Reads the value of a field-or-property MemberInfo from the target object.
-    // m (MemberInfo): field or property accessor
-    // target (object): instance to read from
-    // returns: object?
     private static object? ReadMember(MemberInfo? m, object target)
     {
         if (m is FieldInfo f) return f.GetValue(target);
@@ -430,7 +399,7 @@ internal static class PhotonNet
             // Build a dynamic trampoline: void(EventData) -> calls our static dispatch with object boxing.
             ParameterInfo[] invokeParams = ev.EventHandlerType.GetMethod("Invoke")!.GetParameters();
             DynamicMethod dm = new("BBVOPhotonEvTrampoline", typeof(void),
-                new[] { invokeParams[0].ParameterType }, typeof(PhotonNet).Module, true);
+                [invokeParams[0].ParameterType], typeof(PhotonNet).Module, true);
             ILGenerator il = dm.GetILGenerator();
             il.Emit(OpCodes.Ldarg_0);
             il.Emit(OpCodes.Call, typeof(PhotonNet).GetMethod(nameof(DispatchEvent), BindingFlags.NonPublic | BindingFlags.Static)!);
@@ -448,7 +417,6 @@ internal static class PhotonNet
         }
     }
 
-    // Unsubscribes the event handler. Safe to call multiple times.
     internal static void Unsubscribe()
     {
         if (!_subscribed) return;
@@ -476,7 +444,7 @@ internal static class PhotonNet
 
     // Sends an event to a single actor by actor number (reliable).
     internal static void SendToActor(byte code, object? data, int actorNumber) =>
-        RaiseEvent(code, data, new[] { actorNumber }, true, false);
+        RaiseEvent(code, data, [actorNumber], true, false);
 
     // Internal trampoline target invoked by the dynamic delegate; unboxes the EventData.
     private static void DispatchEvent(object eventData)
@@ -548,7 +516,7 @@ internal static class PhotonNet
                 BindingFlags.Public | BindingFlags.Static);
             object send = sendField != null ? sendField.GetValue(null)! : Activator.CreateInstance(SendOpts)!;
 
-            object? rv = _raiseEventMethod.Invoke(null, new object?[] { code, data, opts, send });
+            object? rv = _raiseEventMethod.Invoke(null, [code, data, opts, send]);
             if (code >= 173 && code <= 180)
             {
                 string target = targetActors != null ? $"actor {targetActors[0]}"

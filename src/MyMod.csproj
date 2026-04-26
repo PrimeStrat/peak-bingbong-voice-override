@@ -41,7 +41,7 @@
     <ItemGroup>
       <_StagePlugin Include="$(OutputPath)$(ModName).dll" />
       <_StagePlugin Include="$(OutputPath)$(ModName).pdb" Condition="Exists('$(OutputPath)$(ModName).pdb')" />
-      <_StagePlugin Include="$(MSBuildThisFileDirectory)..\assets\fonts\DarumadropOne-Regular.ttf" />
+      <_StagePlugin Include="$(MSBuildThisFileDirectory)..\assets\fonts\DarumadropOne-Regular.ttf" Condition="Exists('$(MSBuildThisFileDirectory)..\assets\fonts\DarumadropOne-Regular.ttf')" />
       <_StagePlugin Include="$(MSBuildThisFileDirectory)..\assets\yt-dlp.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\assets\yt-dlp.exe')" />
       <_StageMeta Include="$(ThunderstoreDir)manifest.json" />
       <_StageMeta Include="$(ThunderstoreDir)README.md" />

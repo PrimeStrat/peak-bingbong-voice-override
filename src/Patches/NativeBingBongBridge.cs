@@ -33,7 +33,7 @@ internal static class NativeBingBongBridge
     private static readonly Dictionary<int, string> AssignedIdByClip = new Dictionary<int, string>();
 
     // Resolves all reflection handles once and caches success state. Safe to call repeatedly.
-    // returns: bool - true when every required type and member is resolved
+    // returns: bool
     internal static bool TryResolve()
     {
         if (_resolved) return _resolveOk;
@@ -93,9 +93,9 @@ internal static class NativeBingBongBridge
     }
 
     // Writes the given text into LocalizedText.mainTable[id] across every language slot.
-    // id (string): subtitle id used by a BingBongResponse (uppercased before storage)
+    // id (string): subtitle id used by a BingBongResponse
     // text (string): text to display
-    // returns: bool - true when the table was updated
+    // returns: bool
     internal static bool WriteSubtitle(string id, string text)
     {
         if (!TryResolve()) return false;
@@ -130,7 +130,7 @@ internal static class NativeBingBongBridge
 
     // Replaces the responses array on the given Action_AskBingBong instance with one entry per loaded plugin clip.
     // askInstance (object): an Action_AskBingBong instance discovered in the scene
-    // returns: bool - true when the responses array was rewritten
+    // returns: bool
     internal static bool RewriteResponses(object askInstance)
     {
         if (!TryResolve() || askInstance == null) return false;
@@ -170,7 +170,7 @@ internal static class NativeBingBongBridge
 
     // Returns the subtitle id assigned to the given clip during the most recent RewriteResponses pass.
     // clip (AudioClip): clip whose subtitle id to look up
-    // returns: string - assigned id or empty string
+    // returns: string
     internal static string GetAssignedSubtitleId(AudioClip clip)
     {
         if (clip == null) return string.Empty;
@@ -178,8 +178,8 @@ internal static class NativeBingBongBridge
         return id ?? string.Empty;
     }
 
-    // Scans every loaded Action_AskBingBong instance and rewrites its responses array. Useful after clip reloads.
-    // returns: int - number of instances rewritten
+    // Scans every loaded Action_AskBingBong instance and rewrites its responses array.
+    // returns: int
     internal static int RewriteAllInScene()
     {
         if (!TryResolve()) return 0;

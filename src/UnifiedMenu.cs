@@ -38,17 +38,27 @@ internal class UnifiedMenu : MonoBehaviour
     // On-join lobby HUD toast
     internal static float JoinToastUntil = 0f;
     private GUIStyle? _toastStyle;
+    private GUIStyle? _syncToastStyle;
 
     private static readonly Color TimedFillColor = new Color(0.96f, 0.97f, 0.55f, 1f);
     private static readonly Color TimedStrokeColor = new Color(0.08f, 0.08f, 0.04f, 1f);
     private const float TimedStrokeWidth = 3f;
     private const int TimedFontSizeDefault = 28;
 
-    // Polls the menu toggle key each frame and ticks the join toast. returns: void
+    // Polls the menu toggle key each frame and enforces room and host menu-access settings. returns: void
     private void Update()
     {
+        if (!Patches.NetworkSyncPatches.IsInRoom)
+        {
+            if (Plugin.MenuVisible)
+                Plugin.SetMenuVisible(false);
+            return;
+        }
+
         bool isClient = BingBongNetworkSync.IsConnectedAsClient;
-        if (isClient && !BingBongNetworkSync.ClientAllowMenu)
+        // Block menu only when the host is confirmed to have the mod AND has disallowed it.
+        // Without the HostModPresent guard, clients in modless-host rooms would be permanently blocked.
+        if (isClient && BingBongNetworkSync.HostModPresent && !BingBongNetworkSync.ClientAllowMenu)
         {
             if (Plugin.MenuVisible)
                 Plugin.SetMenuVisible(false);
@@ -156,6 +166,7 @@ internal class UnifiedMenu : MonoBehaviour
     {
         DrawSubtitleOverlay();
         DrawJoinToast();
+        DrawSyncToast();
 
         if (!Plugin.MenuVisible) return;
         if (!_windowRectInitialized)
@@ -173,6 +184,44 @@ internal class UnifiedMenu : MonoBehaviour
             $"  BBVO  v{MyPluginInfo.PLUGIN_VERSION}   [{Plugin.MenuToggleKey.Value}] to close",
             GUILayout.Width(WIN_W), GUILayout.Height(WIN_H));
         GUI.skin = prev;
+    }
+
+    // Draws a persistent toast while a file sync is in progress, blocking audio playback. returns: void
+    private void DrawSyncToast()
+    {
+        if (!BingBongNetworkSync.IsSyncBusy) return;
+
+        if (_syncToastStyle == null)
+        {
+            _syncToastStyle = new GUIStyle(GUI.skin.box)
+            {
+                fontSize = 15,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = true,
+                richText = false,
+            };
+            _syncToastStyle.normal.textColor = new Color(0.55f, 1f, 0.65f, 1f);
+            _syncToastStyle.normal.background = MakeTex(new Color(0.06f, 0.12f, 0.08f, 0.92f));
+            _syncToastStyle.padding = new RectOffset(18, 18, 10, 10);
+        }
+
+        string msg;
+        if (BingBongNetworkSync.IsHosting)
+        {
+            int remaining = BingBongNetworkSync.GetUnsyncedPlayerNames().Count;
+            msg = $"Syncing audio to clients...  {remaining} player(s) remaining  --  playback paused";
+        }
+        else
+        {
+            msg = $"Syncing from host...  {BingBongNetworkSync.StatusText}  --  playback paused";
+        }
+
+        float w = 580f;
+        float h = 50f;
+        float x = (Screen.width - w) * 0.5f;
+        float y = Screen.height * 0.07f;
+        GUI.Box(new Rect(x, y, w, h), msg, _syncToastStyle);
     }
 
     // Draws the on-join lobby HUD toast that fades out after a few seconds. returns: void
