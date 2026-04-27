@@ -35,7 +35,8 @@ internal static class BingBongNetworkSync
     // Leave room for Photon serialization overhead instead of targeting the theoretical max payload size.
     private const int CHUNK_SIZE = 12 * 1024;
     private const int MAX_STRING_BATCH_BYTES = 12 * 1024;
-    private const int CHUNKS_PER_SEND_SLICE = 3;
+    private const int CHUNKS_PER_SEND_SLICE = 1;
+    private const float CHUNK_SEND_INTERVAL_SECONDS = 0.1f;
     private const float CLIENT_TRANSFER_STALL_TIMEOUT_SECONDS = 60f;
 
     // Human-readable transport state shown in menus and overlay.
@@ -171,6 +172,8 @@ internal static class BingBongNetworkSync
         Patches.PhotonNet.Unsubscribe();
         DisposeIncomingChunkWriters();
         ClearOutboundChunkQueue();
+        _clientSyncRunning = false;
+        _syncFailed = false;
         lock (_syncLock)
         {
             _lobbyPlayerNames.Clear();
@@ -982,7 +985,7 @@ internal static class BingBongNetworkSync
                 Plugin.Log.LogWarning($"[Sync] Send failed for '{transfer.FileName}': {ex.Message}");
             }
 
-            yield return null;
+            yield return new WaitForSeconds(CHUNK_SEND_INTERVAL_SECONDS);
         }
     }
 

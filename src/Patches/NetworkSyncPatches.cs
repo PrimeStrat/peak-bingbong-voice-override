@@ -107,8 +107,11 @@ internal static class NetworkSyncPatches
                 if (BingBongNetworkSync.IsHosting) return;
                 Plugin.Log.LogInfo($"[NetworkSync] Local player joined room as host.");
                 BingBongNetworkSync.StartServer();
-                foreach (string name in PhotonBridge.GetOtherPlayerNames())
+                List<string> others = PhotonBridge.GetOtherPlayerNames();
+                foreach (string name in others)
                     BingBongNetworkSync.OnPhotonPlayerJoined(name);
+                if (others.Count > 0)
+                    BingBongNetworkSync.BroadcastRefresh();
             }
             else
             {
