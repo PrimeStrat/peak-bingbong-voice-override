@@ -7,15 +7,14 @@ config-version = "0.0.0"
 [package]
 namespace      = "PrimeStrat"
 name           = "BingBongVoiceOverride"
-versionNumber  = "1.0.1"
+versionNumber  = "1.0.4"
 description    = "Drop custom audio files into the sounds folder to override Bing Bong's SFX in PEAK."
 websiteUrl     = "https://github.com/PrimeStrat/peak-bingbong-voice-override"
 containsNsfwContent = false
 
 [[package.dependencies]]
 # Reference dependencies as "Namespace-Name-Version".
-# Default: BepInEx 5.4.21 pack.
-# name = "BepInEx-BepInExPack-5.4.2100"
+name = "BepInEx-BepInExPack_PEAK-5.4.75301"
 
 [build]
 icon       = "thunderstore/icon.png"

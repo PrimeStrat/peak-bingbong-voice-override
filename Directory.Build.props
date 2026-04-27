@@ -4,7 +4,7 @@
     <ModName>BingBongVoiceOverride</ModName>
     <ModAuthor>PrimeStrat</ModAuthor>
     <ModContributors>Ariannasv22</ModContributors>
-    <ModVersion>1.0.1</ModVersion>
+    <ModVersion>1.0.4</ModVersion>
     <ModGuid>com.$(ModAuthor).$(ModName)</ModGuid>
     <ModDescription>Drop custom audio files into the sounds folder and automatically override Bing Bong's SFX in PEAK.</ModDescription>
 

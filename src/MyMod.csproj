@@ -58,9 +58,9 @@
   <!--
     Pack target: zip the staged contents into dist/<ModName>-<Version>.zip in the layout
     Thunderstore expects (manifest.json + icon.png + README.md at root, plugin DLL under plugins/).
-    Run with: dotnet build -t:Pack
+    Run with: dotnet build -t:PackThunderstore
   -->
-  <Target Name="Pack" DependsOnTargets="Build">
+  <Target Name="PackThunderstore" DependsOnTargets="Build">
     <PropertyGroup>
       <PackageZip>$(DistDir)$(ModAuthor)-$(ModName)-$(ModVersion).zip</PackageZip>
     </PropertyGroup>

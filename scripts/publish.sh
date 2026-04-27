@@ -19,7 +19,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "==> Building ($CONFIG)"
-dotnet build src/MyMod.csproj -c "$CONFIG" -t:Pack
+dotnet build src/MyMod.csproj -c "$CONFIG" -t:PackThunderstore
 
 ZIP="$(ls -t dist/*.zip 2>/dev/null | head -n1 || true)"
 [ -n "$ZIP" ] || { echo "No package zip produced." >&2; exit 1; }

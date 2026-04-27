@@ -3,10 +3,12 @@
     Build, package, and publish the mod to Thunderstore.
 
 .DESCRIPTION
-    Runs `dotnet build -t:Pack` to produce dist/<author>-<mod>-<version>.zip, then
-    invokes the Thunderstore CLI (`tcli publish`) to upload it. The Thunderstore API
-    token is read from the THUNDERSTORE_TOKEN environment variable (or pass -Token).
-    Skips publishing when -PackOnly is supplied.
+    Runs `dotnet build` to compile and stage the plugin, then invokes the Thunderstore
+    CLI (`tcli publish`) which reads thunderstore.toml to build the zip and upload it
+    with the correct community, categories, and dependencies.
+    The Thunderstore API token is read from the THUNDERSTORE_TOKEN environment variable
+    (or pass -Token). Skips publishing when -PackOnly is supplied (uses PackThunderstore
+    to produce a local zip for inspection).
 
 .PARAMETER Configuration
     MSBuild configuration. Defaults to Release.
@@ -15,7 +17,7 @@
     Thunderstore API token. Falls back to $env:THUNDERSTORE_TOKEN.
 
 .PARAMETER PackOnly
-    Build and zip the package without uploading.
+    Build and zip the package locally without uploading.
 
 .EXAMPLE
     pwsh ./scripts/publish.ps1 -PackOnly
@@ -32,14 +34,17 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 try {
+    if ($PackOnly) {
+        Write-Host "==> Building & packaging (local zip only)" -ForegroundColor Cyan
+        dotnet build "src/MyMod.csproj" -c $Configuration -t:PackThunderstore
+        $zip = Get-ChildItem "dist/*.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $zip) { throw "No package zip produced in dist/." }
+        Write-Host "==> Package: $($zip.FullName)" -ForegroundColor Green
+        return
+    }
+
     Write-Host "==> Restoring & building ($Configuration)" -ForegroundColor Cyan
-    dotnet build "src/MyMod.csproj" -c $Configuration -t:Pack
-
-    $zip = Get-ChildItem "dist/*.zip" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $zip) { throw "No package zip produced in dist/." }
-    Write-Host "==> Package: $($zip.FullName)" -ForegroundColor Green
-
-    if ($PackOnly) { return }
+    dotnet build "src/MyMod.csproj" -c $Configuration
 
     if (-not (Get-Command tcli -ErrorAction SilentlyContinue)) {
         Write-Host "==> Installing Thunderstore CLI (tcli)" -ForegroundColor Cyan
@@ -49,7 +54,7 @@ try {
     if (-not $Token) { throw "THUNDERSTORE_TOKEN not set. Pass -Token or set the env var." }
 
     Write-Host "==> Publishing to Thunderstore" -ForegroundColor Cyan
-    tcli publish --file $zip.FullName --token $Token
+    tcli publish --token $Token
 }
 finally {
     Pop-Location

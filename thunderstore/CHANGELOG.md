@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.2
+- Fixed dependency listing to use the PEAK-specific BepInExPack.
+
 ## 1.0.1
 - Fixed clients in rooms where the host lacks the mod being permanently menu-blocked.
 - Fixed a double-broadcast cascade that caused clients to mistakenly start their own sync servers on clip reload.
