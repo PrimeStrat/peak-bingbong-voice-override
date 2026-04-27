@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.5
+- Fixed packaging scripts
+
+## 1.0.4
+- Minor bug fixes
+- Minor bug fixes
+
+## 1.0.3
+- Minor bug fixes
+
 ## 1.0.2
 - Fixed dependency listing to use the PEAK-specific BepInExPack.
 

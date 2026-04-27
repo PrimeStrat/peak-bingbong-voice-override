@@ -36,11 +36,10 @@
   <Target Name="StagePackage" AfterTargets="Build">
     <PropertyGroup>
       <PackageStageDir>$(ArtifactsDir)package\</PackageStageDir>
-      <PluginStageDir>$(PackageStageDir)plugins\$(ModName)\</PluginStageDir>
+      <PluginStageDir>$(PackageStageDir)Mods\</PluginStageDir>
     </PropertyGroup>
     <ItemGroup>
       <_StagePlugin Include="$(OutputPath)$(ModName).dll" />
-      <_StagePlugin Include="$(OutputPath)$(ModName).pdb" Condition="Exists('$(OutputPath)$(ModName).pdb')" />
       <_StagePlugin Include="$(MSBuildThisFileDirectory)..\assets\fonts\DarumadropOne-Regular.ttf" Condition="Exists('$(MSBuildThisFileDirectory)..\assets\fonts\DarumadropOne-Regular.ttf')" />
       <_StagePlugin Include="$(MSBuildThisFileDirectory)..\assets\yt-dlp.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\assets\yt-dlp.exe')" />
       <_StageMeta Include="$(ThunderstoreDir)manifest.json" />
@@ -57,7 +56,7 @@
 
   <!--
     Pack target: zip the staged contents into dist/<ModName>-<Version>.zip in the layout
-    Thunderstore expects (manifest.json + icon.png + README.md at root, plugin DLL under plugins/).
+    Thunderstore expects (manifest.json + icon.png + README.md at root, plugin DLL under Mods/).
     Run with: dotnet build -t:PackThunderstore
   -->
   <Target Name="PackThunderstore" DependsOnTargets="Build">
