@@ -1,10 +1,12 @@
 # Changelog
 
+## 1.0.6
+- Backend auto-download config toggle in the attempt to test package uploading
+
 ## 1.0.5
 - Fixed packaging scripts
 
 ## 1.0.4
-- Minor bug fixes
 - Minor bug fixes
 
 ## 1.0.3

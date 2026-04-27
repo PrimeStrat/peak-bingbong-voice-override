@@ -87,13 +87,16 @@ public partial class Plugin
         string ytDlp = FindYtDlp();
         if (string.IsNullOrEmpty(ytDlp))
         {
-            ImportStatus = "yt-dlp not found -- downloading automatically...";
-            yield return StartCoroutine(TryAutoDownloadYtDlpCoroutine());
-            ytDlp = FindYtDlp();
+            if (AllowYtDlpAutoDownload.Value)
+            {
+                ImportStatus = "yt-dlp not found -- downloading automatically...";
+                yield return StartCoroutine(TryAutoDownloadYtDlpCoroutine());
+                ytDlp = FindYtDlp();
+            }
         }
         if (string.IsNullOrEmpty(ytDlp))
         {
-            ImportStatus = "error: yt-dlp could not be found or downloaded. Get it from https://github.com/yt-dlp/yt-dlp";
+            ImportStatus = "error: yt-dlp not found. Place yt-dlp.exe in the plugin folder or on PATH. Get it from https://github.com/yt-dlp/yt-dlp/releases/latest";
             yield break;
         }
 
@@ -101,13 +104,16 @@ public partial class Plugin
         string ffmpeg = FindFfmpeg(pluginDirForFfmpeg);
         if (string.IsNullOrEmpty(ffmpeg))
         {
-            ImportStatus = "ffmpeg not found -- downloading automatically...";
-            yield return StartCoroutine(TryAutoDownloadFfmpegCoroutine(pluginDirForFfmpeg));
-            ffmpeg = FindFfmpeg(pluginDirForFfmpeg);
+            if (AllowYtDlpAutoDownload.Value)
+            {
+                ImportStatus = "ffmpeg not found -- downloading automatically...";
+                yield return StartCoroutine(TryAutoDownloadFfmpegCoroutine(pluginDirForFfmpeg));
+                ffmpeg = FindFfmpeg(pluginDirForFfmpeg);
+            }
         }
         if (string.IsNullOrEmpty(ffmpeg))
         {
-            ImportStatus = "error: ffmpeg could not be found or downloaded. Get it from https://ffmpeg.org/download.html";
+            ImportStatus = "error: ffmpeg not found. Place ffmpeg.exe in the plugin folder or on PATH. Get it from https://ffmpeg.org/download.html";
             yield break;
         }
 

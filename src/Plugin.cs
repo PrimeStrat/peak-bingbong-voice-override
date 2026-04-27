@@ -29,6 +29,7 @@ public partial class Plugin : BaseUnityPlugin
     internal static ConfigEntry<int> MaxSyncFileSizeKb = null!;
     internal static ConfigEntry<bool> TimedSubtitlesEnabled = null!;
     internal static ConfigEntry<bool> FetchTimedSubtitlesOnImport = null!;
+    internal static ConfigEntry<bool> AllowYtDlpAutoDownload = null!;
     internal static ConfigEntry<bool> ShowSubtitleOverlay = null!;
     internal static ConfigEntry<bool> UseNativeBingBongAPI = null!;
     internal static ConfigEntry<bool> UseNativeSubtitleWithCustomAudio = null!;
@@ -139,6 +140,8 @@ public partial class Plugin : BaseUnityPlugin
             "When true, clips with a timedSubtitles track display sing-along lines while holding Bing Bong.");
         FetchTimedSubtitlesOnImport = Config.Bind("Subtitles", "FetchTimedSubtitlesOnImport", false,
             "When true, the importer also runs yt-dlp to fetch a timed caption track for the clip.");
+        AllowYtDlpAutoDownload = Config.Bind("Import", "AllowYtDlpAutoDownload", false,
+            "When true, yt-dlp and ffmpeg are downloaded automatically if missing. When false, a manual install message is shown instead.");
         ShowSubtitleOverlay = Config.Bind("Subtitles", "ShowSubtitleOverlay", false,
             "When true, the mod draws its own subtitle overlay near the bottom of the screen while holding Bing Bong.");
         UseNativeBingBongAPI = Config.Bind("Subtitles", "UseNativeBingBongAPI", true,
