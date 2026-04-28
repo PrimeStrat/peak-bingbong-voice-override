@@ -1,19 +1,18 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.InteropServices;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using BingBongVoiceOverride.Handlers;
 using BingBongVoiceOverride.Patches;
 using HarmonyLib;
 using UnityEngine;
 namespace BingBongVoiceOverride;
 
 [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
-public partial class Plugin : BaseUnityPlugin
-{
+public partial class Plugin : BaseUnityPlugin {
     internal static Plugin Instance = null!;
     internal static ManualLogSource Log = null!;
     internal static ConfigEntry<bool> EnableMod = null!;
@@ -64,8 +63,7 @@ public partial class Plugin : BaseUnityPlugin
     {
         get
         {
-            for (int i = 0; i < ManagedSources.Count; i++)
-            {
+                         {
                 if (ManagedSources[i] != null && ManagedSources[i].isPlaying) return true;
             }
             return PluginAudioSource != null && PluginAudioSource.isPlaying;
@@ -87,6 +85,7 @@ public partial class Plugin : BaseUnityPlugin
     internal static bool MenuVisible = false;
     internal static bool IsRefreshPending => Instance?._refreshPending ?? false;
     internal static string ImportStatus = "idle";
+    internal static PluginJsonConfig JsonConfig = new();
 
     public static string SoundsFolder { get; private set; } = null!;
 
@@ -95,27 +94,17 @@ public partial class Plugin : BaseUnityPlugin
     private static bool _menuStateCaptured = false;
     private static CursorLockMode _savedCursorLock = CursorLockMode.Locked;
     private static bool _savedCursorVisible = false;
-    private static bool _menuPauseInjected = false;
     private static float _nextSubtitleImportAllowedAt = 0f;
 
-    private const byte VK_ESCAPE = 0x1B;
-    private const uint KEYEVENTF_KEYUP = 0x0002;
     private const float SubtitleImportCooldownSeconds = 1.25f;
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, System.UIntPtr dwExtraInfo);
-
-    internal sealed class TimedSubtitleLine
-    {
+    internal sealed class TimedSubtitleLine {
         internal float Start;
         internal float End;
         internal string Text = string.Empty;
     }
 
-    // BepInEx entry point; binds config, applies patches, mounts the debug overlay, and starts audio loading.
-    // returns: void
-    private void Awake()
-    {
+    private void Awake() {
         Instance = this;
         Log = Logger;
 
@@ -170,27 +159,28 @@ public partial class Plugin : BaseUnityPlugin
         AllowClientSettingsChange.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
         AllowClientMenu.SettingChanged += (_, _) => BingBongNetworkSync.BroadcastPermissions();
 
-        if (!EnableMod.Value)
-        {
+                 {
             Log.LogInfo($"{MyPluginInfo.PLUGIN_NAME} is disabled via config.");
             return;
         }
 
         SoundsFolder = Path.Combine(Paths.PluginPath, "PrimeStrat-BingBongVoiceOverride", "sounds");
         Directory.CreateDirectory(SoundsFolder);
+        JsonConfig = JsonConfigHandler.Load(Path.Combine(SoundsFolder, "mod-config.json"), Log);
+        JsonConfigHandler.ApplyToRuntime(JsonConfig);
         EnsureExampleFiles();
 
         _harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         _harmony.PatchAll();
         if (UseNativeBingBongAPI.Value)
-            NativeBingBongBridge.TryResolve();
+            NativeBingBongHandler.TryResolve();
         SubtitleTextOverridePatches.Apply(_harmony);
-        NetworkSyncPatches.TryApply(_harmony);
+        NetworkSyncPatches.Apply(_harmony);
 
         PluginAudioSource = gameObject.AddComponent<AudioSource>();
         PluginAudioSource.playOnAwake = false;
         PluginAudioSource.spatialBlend = 0f;
-        gameObject.AddComponent<UnifiedMenu>();
+        gameObject.AddComponent<Menu>();
 
         StartCoroutine(AutoPlayLoop());
         StartCoroutine(MusicModeLoop());
@@ -202,34 +192,24 @@ public partial class Plugin : BaseUnityPlugin
         Log.LogInfo($"Sounds folder: {SoundsFolder}");
     }
 
-    // Handles per-frame plugin logic for subtitle ticks and game-state tracking.
-    // returns: void
-    private void Update()
-    {
+    private void Update() {
         if (!EnableMod.Value || _refreshPending) return;
         UpdateFollowTransform();
         UpdateTimedSubtitleState();
         if (UseNativeBingBongAPI.Value)
             TickNativeTimedSubtitle();
         SubtitleTextOverridePatches.TickForceActiveSubtitle();
-        TickMirrorOnDrop();
         TickSyncPause();
     }
 
-    // Unpatches Harmony and stops the sound sync server when the plugin unloads.
-    // returns: void
-    private void OnDestroy()
-    {
+    private void OnDestroy() {
         SetMenuVisible(false);
         StopAllPlayback();
         _harmony?.UnpatchSelf();
         BingBongNetworkSync.StopServer();
     }
 
-    // Ensures every plugin-managed audio source is silenced when the application is quitting.
-    // returns: void
-    private void OnApplicationQuit()
-    {
+    private void OnApplicationQuit() {
         StopAllPlayback();
         BingBongNetworkSync.StopServer();
     }

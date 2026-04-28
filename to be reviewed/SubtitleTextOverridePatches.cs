@@ -5,9 +5,7 @@ using HarmonyLib;
 using UnityEngine;
 namespace BingBongVoiceOverride.Patches;
 
-// Patches common Unity text setters so active Bing Bong subtitle overrides can replace the game's default subtitle line.
-internal static class SubtitleTextOverridePatches
-{
+internal static class SubtitleTextOverridePatches {
     private static readonly List<object> TrackedTargets = [];
     private static readonly HashSet<int> StyleCapturedIds = [];
     private static readonly Dictionary<int, bool> SubtitleTargetCache = [];
@@ -15,14 +13,10 @@ internal static class SubtitleTextOverridePatches
     private static readonly string[] SubtitleHierarchyExcludeKeywords = ["button", "btn", "label", "header", "title", "tooltip", "icon", "name", "score", "time", "hp", "health", "stamina", "chat", "version"];
     private static bool _internalWrite = false;
 
-    /// End time (unscaledTime) of the current discovery window during which any text setter write is treated as a candidate Bing Bong subtitle target.
     private static float _discoverUntil = 0f;
-    /// Next time we'll force-push the active subtitle into all tracked targets.
     private static float _nextForcePushAt = 0f;
-    /// Interval between forced re-pushes of the active subtitle into tracked targets.
     private const float ForcePushInterval = 0.1f;
 
-    /// Cached visual style sampled from the native Bing Bong subtitle text component, used to mimic it in the IMGUI overlay.
     internal static bool StyleCaptured = false;
     internal static Font? CapturedFont = null;
     internal static int CapturedFontSize = 28;
@@ -33,11 +27,7 @@ internal static class SubtitleTextOverridePatches
     internal static TextAnchor CapturedAnchor = TextAnchor.MiddleCenter;
     internal static Rect CapturedScreenRect = new Rect(0f, 0f, 0f, 0f);
 
-    // Applies best-effort patches for Unity UI and TextMeshPro text setters.
-    // harmony (Harmony): active Harmony instance used by the plugin
-    // returns: void
-    internal static void Apply(Harmony harmony)
-    {
+    internal static void Apply(Harmony harmony) {
         TryPatchTextSetter(harmony, "UnityEngine.UI.Text");
         TryPatchTextSetter(harmony, "TMPro.TMP_Text");
         TryPatchTextSetter(harmony, "TMPro.TextMeshProUGUI");
@@ -47,8 +37,7 @@ internal static class SubtitleTextOverridePatches
         TryPatchTmpSetTextString(harmony, "TMPro.TextMeshPro");
     }
 
-    private static void TryPatchTextSetter(Harmony harmony, string typeName)
-    {
+    private static void TryPatchTextSetter(Harmony harmony, string typeName) {
         Type t = AccessTools.TypeByName(typeName);
         if (t == null)
             return;
@@ -63,24 +52,20 @@ internal static class SubtitleTextOverridePatches
         );
     }
 
-    private static void TryPatchTmpSetTextString(Harmony harmony, string typeName)
-    {
+    private static void TryPatchTmpSetTextString(Harmony harmony, string typeName) {
         Type t = AccessTools.TypeByName(typeName);
         if (t == null)
             return;
 
         MethodInfo[] methods;
-        try
-        {
+                 {
             methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
         }
-        catch (Exception)
-        {
+        catch (Exception) {
             return;
         }
 
-        for (int i = 0; i < methods.Length; i++)
-        {
+        for (int i = 0; i < methods.Length; i++) {
             MethodInfo m = methods[i];
             if (m.Name != "SetText")
                 continue;
@@ -91,34 +76,25 @@ internal static class SubtitleTextOverridePatches
             if (ps[0].ParameterType != typeof(string))
                 continue;
 
-            try
-            {
+                         {
                 harmony.Patch(
                     m,
                     prefix: new HarmonyMethod(typeof(SubtitleTextOverridePatches), nameof(SetTextStringPrefix))
                 );
             }
-            catch (Exception)
-            {
+            catch (Exception) {
             }
         }
     }
 
-    // Opens a short discovery window during which any text setter write is captured as a candidate subtitle target.
-    // durationSeconds (float): how long the window stays open
-    // returns: void
-    internal static void BeginDiscoveryWindow(float durationSeconds)
-    {
+    internal static void BeginDiscoveryWindow(float durationSeconds) {
         float now = Time.unscaledTime;
         float end = now + Mathf.Max(0.25f, durationSeconds);
         if (end > _discoverUntil)
             _discoverUntil = end;
     }
 
-    // Drives per-frame subtitle override behavior; pushes active subtitle into tracked native UI.
-    // returns: void
-    internal static void TickForceActiveSubtitle()
-    {
+    internal static void TickForceActiveSubtitle() {
         if (Plugin.MenuVisible)
             return;
 
@@ -134,24 +110,20 @@ internal static class SubtitleTextOverridePatches
 
         string desired = timed ? (Plugin.ActiveSubtitle ?? string.Empty) : (hasActive ? Plugin.ActiveSubtitle : string.Empty);
 
-        for (int i = TrackedTargets.Count - 1; i >= 0; i--)
-        {
+        for (int i = TrackedTargets.Count - 1; i >= 0; i--) {
             object target = TrackedTargets[i];
-            if (target == null)
-            {
+            if (target == null) {
                 TrackedTargets.RemoveAt(i);
                 continue;
             }
 
             PropertyInfo p = target.GetType().GetProperty("text");
-            if (p == null || !p.CanWrite)
-            {
+            if (p == null || !p.CanWrite) {
                 TrackedTargets.RemoveAt(i);
                 continue;
             }
 
-            try
-            {
+                         {
                 string current = p.GetValue(target) as string ?? string.Empty;
                 if (current.Equals(desired, StringComparison.Ordinal))
                     continue;
@@ -160,16 +132,14 @@ internal static class SubtitleTextOverridePatches
                 p.SetValue(target, desired, null);
                 _internalWrite = false;
             }
-            catch (Exception)
-            {
+            catch (Exception) {
                 _internalWrite = false;
                 TrackedTargets.RemoveAt(i);
             }
         }
     }
 
-    private static void TextSetterPrefix(object __instance, ref string value)
-    {
+    private static void TextSetterPrefix(object __instance, ref string value) {
         if (_internalWrite)
             return;
         if (Plugin.MenuVisible)
@@ -189,8 +159,7 @@ internal static class SubtitleTextOverridePatches
         value = timed ? (Plugin.ActiveSubtitle ?? string.Empty) : (hasActive ? Plugin.ActiveSubtitle : string.Empty);
     }
 
-    private static void SetTextStringPrefix(object __instance, ref string __0)
-    {
+    private static void SetTextStringPrefix(object __instance, ref string __0) {
         if (_internalWrite)
             return;
         if (Plugin.MenuVisible)
@@ -210,13 +179,11 @@ internal static class SubtitleTextOverridePatches
         __0 = timed ? (Plugin.ActiveSubtitle ?? string.Empty) : (hasActive ? Plugin.ActiveSubtitle : string.Empty);
     }
 
-    private static bool IsCandidateSubtitleTarget(object target)
-    {
+    private static bool IsCandidateSubtitleTarget(object target) {
         return IsBingBongSubtitleTarget(target);
     }
 
-    private static bool IsBingBongSubtitleTarget(object target)
-    {
+    private static bool IsBingBongSubtitleTarget(object target) {
         Component? c = target as Component;
         if (c == null)
             return false;
@@ -226,31 +193,24 @@ internal static class SubtitleTextOverridePatches
             return cached;
 
         bool match = false;
-        try
-        {
+                 {
             UnityEngine.Transform t = c.transform;
-            while (t != null && !match)
-            {
+            while (t != null && !match) {
                 string name = t.gameObject.name;
                 bool excluded = false;
-                for (int j = 0; j < SubtitleHierarchyExcludeKeywords.Length; j++)
-                {
-                    if (name.IndexOf(SubtitleHierarchyExcludeKeywords[j], StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
+                for (int j = 0; j < SubtitleHierarchyExcludeKeywords.Length; j++) {
+                    if (name.IndexOf(SubtitleHierarchyExcludeKeywords[j], StringComparison.OrdinalIgnoreCase) >= 0) {
                         excluded = true;
                         break;
                     }
                 }
-                if (excluded)
-                {
+                if (excluded) {
                     t = t.parent;
                     continue;
                 }
 
-                for (int i = 0; i < SubtitleHierarchyKeywords.Length; i++)
-                {
-                    if (name.IndexOf(SubtitleHierarchyKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
+                for (int i = 0; i < SubtitleHierarchyKeywords.Length; i++) {
+                    if (name.IndexOf(SubtitleHierarchyKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0) {
                         match = true;
                         break;
                     }
@@ -258,16 +218,14 @@ internal static class SubtitleTextOverridePatches
                 t = t.parent;
             }
         }
-        catch (Exception)
-        {
+        catch (Exception) {
         }
 
         SubtitleTargetCache[id] = match;
         return match;
     }
 
-    private static void CaptureStyleFromOnce(object target)
-    {
+    private static void CaptureStyleFromOnce(object target) {
         Component? c = target as Component;
         if (c == null)
             return;
@@ -278,8 +236,7 @@ internal static class SubtitleTextOverridePatches
         CaptureStyleFrom(target);
     }
 
-    private static void TrackTarget(object target)
-    {
+    private static void TrackTarget(object target) {
         if (target == null)
             return;
         if (TrackedTargets.Contains(target))
@@ -287,27 +244,23 @@ internal static class SubtitleTextOverridePatches
         TrackedTargets.Add(target);
     }
 
-    private static void CaptureStyleFrom(object target)
-    {
+    private static void CaptureStyleFrom(object target) {
         Component? c = target as Component;
         if (c == null)
             return;
 
-        try
-        {
+                 {
             Type t = target.GetType();
 
             PropertyInfo colorProp = t.GetProperty("color");
-            if (colorProp != null && colorProp.PropertyType == typeof(Color))
-            {
+            if (colorProp != null && colorProp.PropertyType == typeof(Color)) {
                 object cv = colorProp.GetValue(target);
                 if (cv is Color col)
                     CapturedColor = col;
             }
 
             PropertyInfo fontSizeProp = t.GetProperty("fontSize");
-            if (fontSizeProp != null)
-            {
+            if (fontSizeProp != null) {
                 object fs = fontSizeProp.GetValue(target);
                 if (fs is int isize && isize > 0)
                     CapturedFontSize = isize;
@@ -316,16 +269,14 @@ internal static class SubtitleTextOverridePatches
             }
 
             PropertyInfo fontStyleProp = t.GetProperty("fontStyle");
-            if (fontStyleProp != null)
-            {
+            if (fontStyleProp != null) {
                 object fsv = fontStyleProp.GetValue(target);
                 if (fsv is FontStyle fst)
                     CapturedFontStyle = fst;
             }
 
             PropertyInfo alignProp = t.GetProperty("alignment");
-            if (alignProp != null)
-            {
+            if (alignProp != null) {
                 object av = alignProp.GetValue(target);
                 if (av is TextAnchor ta)
                     CapturedAnchor = ta;
@@ -334,18 +285,14 @@ internal static class SubtitleTextOverridePatches
             }
 
             PropertyInfo fontProp = t.GetProperty("font");
-            if (fontProp != null)
-            {
+            if (fontProp != null) {
                 object fv = fontProp.GetValue(target);
-                if (fv is Font f)
-                {
+                if (fv is Font f) {
                     CapturedFont = f;
                 }
-                else if (fv != null)
-                {
+                else if (fv != null) {
                     PropertyInfo srcProp = fv.GetType().GetProperty("sourceFontFile");
-                    if (srcProp != null)
-                    {
+                    if (srcProp != null) {
                         object src = srcProp.GetValue(fv);
                         if (src is Font sf)
                             CapturedFont = sf;
@@ -354,16 +301,14 @@ internal static class SubtitleTextOverridePatches
             }
 
             PropertyInfo outlineColorProp = t.GetProperty("outlineColor");
-            if (outlineColorProp != null && outlineColorProp.PropertyType == typeof(Color))
-            {
+            if (outlineColorProp != null && outlineColorProp.PropertyType == typeof(Color)) {
                 object oc = outlineColorProp.GetValue(target);
                 if (oc is Color outline)
                     CapturedOutlineColor = outline;
             }
 
             PropertyInfo outlineWidthProp = t.GetProperty("outlineWidth");
-            if (outlineWidthProp != null)
-            {
+            if (outlineWidthProp != null) {
                 object ow = outlineWidthProp.GetValue(target);
                 if (ow is float f && f > 0f)
                     CapturedOutlineWidth = Mathf.Clamp(f * 8f, 1f, 4f);
@@ -378,13 +323,11 @@ internal static class SubtitleTextOverridePatches
 
             StyleCaptured = true;
         }
-        catch (Exception)
-        {
+        catch (Exception) {
         }
     }
 
-    private static TextAnchor MapTmpAlignment(string name)
-    {
+    private static TextAnchor MapTmpAlignment(string name) {
         if (string.IsNullOrEmpty(name)) return TextAnchor.MiddleCenter;
         string n = name.ToLowerInvariant();
         if (n.Contains("topleft")) return TextAnchor.UpperLeft;
@@ -398,8 +341,7 @@ internal static class SubtitleTextOverridePatches
         return TextAnchor.MiddleCenter;
     }
 
-    private static Rect ComputeScreenRect(RectTransform rt, Canvas canvas)
-    {
+    private static Rect ComputeScreenRect(RectTransform rt, Canvas canvas) {
         Vector3[] corners = new Vector3[4];
         rt.GetWorldCorners(corners);
 

@@ -17,6 +17,7 @@
     <PackageReference Include="BepInEx.PluginInfoProps" Version="2.1.0" />
     <PackageReference Include="UnityEngine.Modules" Version="2021.3.0" IncludeAssets="compile" />
     <PackageReference Include="HarmonyX" Version="2.10.2" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
   <!--
     Reference game-specific assemblies (Assembly-CSharp.dll etc.) by setting GameDir in

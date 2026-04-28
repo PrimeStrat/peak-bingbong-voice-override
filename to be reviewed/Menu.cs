@@ -3,13 +3,11 @@ using System.Collections.Generic;
 using UnityEngine;
 namespace BingBongVoiceOverride;
 
-// Single in-game IMGUI window with tabbed sections for status, sound selection, playback, network, and the URL importer.
-internal class UnifiedMenu : MonoBehaviour
-{
-    private const float WIN_W = 820f;
-    private const float WIN_H = 660f;
+internal class Menu : MonoBehaviour {
+    private const float windowWidth = 820f;
+    private const float windowHeight = 660f;
 
-    private Rect _windowRect = new Rect(0f, 0f, WIN_W, WIN_H);
+    private Rect _windowRect = new Rect(0f, 0f, windowWidth, windowHeight);
     private bool _windowRectInitialized = false;
     private Vector2 _soundsScroll = Vector2.zero;
     private string _importUrl = string.Empty;
@@ -25,7 +23,6 @@ internal class UnifiedMenu : MonoBehaviour
     private int _overlayStyleFontSize;
     private Font? _gameFont;
 
-    // Skin cache
     private GUISkin? _skin;
     private Texture2D? _texDark;
     private Texture2D? _texMid;
@@ -35,8 +32,7 @@ internal class UnifiedMenu : MonoBehaviour
     private Texture2D? _texButtonActive;
     private Texture2D? _texHeader;
 
-    // On-join lobby HUD toast
-    internal static float JoinToastUntil = 0f;
+    internal static float joinToastUntil = 0f;
     private GUIStyle? _toastStyle;
     private GUIStyle? _syncToastStyle;
 
@@ -45,21 +41,15 @@ internal class UnifiedMenu : MonoBehaviour
     private const float TimedStrokeWidth = 3f;
     private const int TimedFontSizeDefault = 28;
 
-    // Polls the menu toggle key each frame and enforces room and host menu-access settings. returns: void
-    private void Update()
-    {
-        if (!Patches.NetworkSyncPatches.IsInRoom)
-        {
+    private void Update() {
+                 {
             if (Plugin.MenuVisible)
                 Plugin.SetMenuVisible(false);
             return;
         }
 
         bool isClient = BingBongNetworkSync.IsConnectedAsClient;
-        // Block menu only when the host is confirmed to have the mod AND has disallowed it.
-        // Without the HostModPresent guard, clients in modless-host rooms would be permanently blocked.
-        if (isClient && BingBongNetworkSync.HostModPresent && !BingBongNetworkSync.ClientAllowMenu)
-        {
+                 {
             if (Plugin.MenuVisible)
                 Plugin.SetMenuVisible(false);
             return;
@@ -68,18 +58,14 @@ internal class UnifiedMenu : MonoBehaviour
             Plugin.SetMenuVisible(!Plugin.MenuVisible);
     }
 
-    // Builds a 1x1 solid-color texture. returns: Texture2D
-    private static Texture2D MakeTex(Color c)
-    {
+    private static Texture2D MakeTex(Color c) {
         Texture2D t = new Texture2D(1, 1);
         t.SetPixel(0, 0, c);
         t.Apply();
         return t;
     }
 
-    // Lazily builds the dark themed GUISkin used for the window. returns: GUISkin
-    private GUISkin GetSkin()
-    {
+    private GUISkin GetSkin() {
         if (_skin != null) return _skin;
 
         _texDark = MakeTex(new Color(0.10f, 0.10f, 0.13f, 0.97f));
@@ -135,7 +121,6 @@ internal class UnifiedMenu : MonoBehaviour
         _skin.horizontalSliderThumb.fixedWidth = 16f;
         _skin.horizontalSliderThumb.fixedHeight = 20f;
 
-        // Toolbar (tab bar)
         _skin.GetStyle("toolbar").normal.background = _texHeader;
         _skin.GetStyle("toolbar").fontSize = 13;
         _skin.GetStyle("toolbarButton").normal.background = _texHeader;
@@ -161,20 +146,17 @@ internal class UnifiedMenu : MonoBehaviour
         return _skin;
     }
 
-    // Draws the menu window when visible. returns: void
-    private void OnGUI()
-    {
+    private void OnGUI() {
         DrawSubtitleOverlay();
         DrawJoinToast();
         DrawSyncToast();
 
         if (!Plugin.MenuVisible) return;
-        if (!_windowRectInitialized)
-        {
+                 {
             _windowRect = new Rect(
-                (Screen.width - WIN_W) * 0.5f,
-                (Screen.height - WIN_H) * 0.35f,
-                WIN_W, WIN_H);
+                (Screen.width - windowWidth) * 0.5f,
+                (Screen.height - windowHeight) * 0.35f,
+                windowWidth, windowHeight);
             _windowRectInitialized = true;
         }
 
@@ -182,17 +164,14 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.skin = GetSkin();
         _windowRect = GUILayout.Window(9875, _windowRect, DrawWindow,
             $"  BBVO  v{MyPluginInfo.PLUGIN_VERSION}   [{Plugin.MenuToggleKey.Value}] to close",
-            GUILayout.Width(WIN_W), GUILayout.Height(WIN_H));
+            GUILayout.Width(windowWidth), GUILayout.Height(windowHeight));
         GUI.skin = prev;
     }
 
-    // Draws a persistent toast while a file sync is in progress, blocking audio playback. returns: void
-    private void DrawSyncToast()
-    {
+    private void DrawSyncToast() {
         if (!BingBongNetworkSync.IsSyncBusy) return;
 
-        if (_syncToastStyle == null)
-        {
+                 {
             _syncToastStyle = new GUIStyle(GUI.skin.box)
             {
                 fontSize = 15,
@@ -207,13 +186,11 @@ internal class UnifiedMenu : MonoBehaviour
         }
 
         string msg;
-        if (BingBongNetworkSync.IsHosting)
-        {
+                 {
             int remaining = BingBongNetworkSync.GetUnsyncedPlayerNames().Count;
             msg = $"Syncing audio to clients...  {remaining} player(s) remaining  --  playback paused";
         }
-        else
-        {
+                 {
             msg = $"Syncing from host...  {BingBongNetworkSync.StatusText}  --  playback paused";
         }
 
@@ -224,13 +201,10 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.Box(new Rect(x, y, w, h), msg, _syncToastStyle);
     }
 
-    // Draws the on-join lobby HUD toast that fades out after a few seconds. returns: void
-    private void DrawJoinToast()
-    {
-        if (Time.unscaledTime > JoinToastUntil) return;
+    private void DrawJoinToast() {
+        if (Time.unscaledTime > joinToastUntil) return;
 
-        if (_toastStyle == null)
-        {
+                 {
             _toastStyle = new GUIStyle(GUI.skin.box)
             {
                 fontSize = 16,
@@ -244,7 +218,7 @@ internal class UnifiedMenu : MonoBehaviour
             _toastStyle.padding = new RectOffset(18, 18, 12, 12);
         }
 
-        float fade = Mathf.Clamp01((JoinToastUntil - Time.unscaledTime) / 1.5f);
+        float fade = Mathf.Clamp01((joinToastUntil - Time.unscaledTime) / 1.5f);
         Color prev = GUI.color;
         GUI.color = new Color(1f, 1f, 1f, fade);
 
@@ -259,9 +233,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.color = prev;
     }
 
-    // Draws timed subtitle fallback text with a hardcoded PEAK-like look. returns: void
-    private void DrawSubtitleOverlay()
-    {
+    private void DrawSubtitleOverlay() {
         bool forceOverlay = Plugin.IsTimedSubtitleActive
             && Plugin.UseNativeBingBongAPI.Value
             && !Plugin.UseNativeSubtitleWithCustomAudio.Value;
@@ -331,18 +303,14 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.matrix = savedMatrix;
     }
 
-    // Resolves a font for timed subtitles by scanning fonts loaded by the game. returns: Font - loaded game font, or null to use default
-    private Font? ResolveTimedSubtitleFont()
-    {
+    private Font? ResolveTimedSubtitleFont() {
         if (_gameFont != null)
             return _gameFont;
 
         Font[] loaded = Resources.FindObjectsOfTypeAll<Font>();
-        for (int i = 0; i < loaded.Length; i++)
-        {
+                 {
             Font f = loaded[i];
-            if (f != null && f != GUI.skin.font)
-            {
+                         {
                 _gameFont = f;
                 Plugin.Log.LogInfo($"Timed subtitle font captured from game: {f.name}");
                 return _gameFont;
@@ -352,17 +320,12 @@ internal class UnifiedMenu : MonoBehaviour
         return null;
     }
 
-    // Renders the tabbed window contents.
-    // windowId (int): Unity window identifier
-    // returns: void
-    private void DrawWindow(int windowId)
-    {
+    private void DrawWindow(int windowId) {
         GUILayout.Space(4f);
         _activeTab = GUILayout.Toolbar(_activeTab, _tabLabels);
         GUILayout.Space(8f);
 
-        switch (_activeTab)
-        {
+                 {
             case 0: DrawStatusTab(); break;
             case 1: DrawSoundsTab(); break;
             case 2: DrawPlaybackTab(); break;
@@ -374,7 +337,6 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.FlexibleSpace();
         GUILayout.Space(4f);
 
-        // Accent separator
         Rect sep = GUILayoutUtility.GetRect(0, 2f, GUILayout.ExpandWidth(true));
         GUI.DrawTexture(sep, _texAccent ?? Texture2D.whiteTexture);
         GUILayout.Space(6f);
@@ -390,9 +352,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
     }
 
-    // Draws a tinted section header label. returns: void
-    private static void SectionHeader(string text)
-    {
+    private static void SectionHeader(string text) {
         GUILayout.Space(4f);
         Color prev = GUI.color;
         GUI.color = new Color(0.98f, 0.72f, 0.10f, 1f);
@@ -401,17 +361,14 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.Space(2f);
     }
 
-    // Draws the Status tab. returns: void
-    private void DrawStatusTab()
-    {
+    private void DrawStatusTab() {
         SectionHeader("Info");
         GUI.color = new Color(0.7f, 1f, 1f);
         GUILayout.Label($"Press [{Plugin.MenuToggleKey.Value}] while the escape menu is open to toggle this window.");
         GUI.color = Color.white;
         GUILayout.Space(6f);
 
-        if (BingBongNetworkSync.IsConnectedAsClient)
-        {
+                 {
             SectionHeader("Network");
             GUI.color = new Color(1f, 1f, 0.5f);
             GUILayout.Label("Connected as client -- sound selection and sync settings are controlled by the host.");
@@ -434,18 +391,15 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.Label($"Loaded:   {Plugin.CustomClips.Count} clip(s)");
         GUILayout.Label($"Active:   {Plugin.GetActiveClips().Count} enabled");
         GUILayout.Label($"Last:     {Plugin.DebugLastPlayed}");
-        if (!string.IsNullOrWhiteSpace(Plugin.ActiveSubtitle))
-        {
+                 {
             GUI.color = new Color(1f, 0.97f, 0.6f);
             GUILayout.Label($"Subtitle: {Plugin.ActiveSubtitle}");
             GUI.color = Color.white;
         }
 
-        if (BingBongNetworkSync.IsHosting)
-        {
+                 {
             List<string> unsynced = BingBongNetworkSync.GetUnsyncedPlayerNames();
-            if (unsynced.Count > 0)
-            {
+                         {
                 GUILayout.Space(6f);
                 SectionHeader("Clients not yet synced");
                 GUI.color = new Color(1f, 0.6f, 0.4f);
@@ -465,23 +419,19 @@ internal class UnifiedMenu : MonoBehaviour
             Plugin.Instance.StartRefresh();
         GUI.backgroundColor = Color.white;
         GUI.enabled = true;
-        if (!canRefresh)
-        {
+                 {
             GUI.color = new Color(0.7f, 0.7f, 0.7f);
             GUILayout.Label("(pick up Bing Bong, or enable ForceEnableRefresh in config)");
             GUI.color = Color.white;
         }
     }
 
-    // Draws the Sounds tab with per-clip enable checkboxes and a play-now button. returns: void
-    private void DrawSoundsTab()
-    {
+    private void DrawSoundsTab() {
         bool isClient = BingBongNetworkSync.IsConnectedAsClient;
         bool canPlay = !isClient || BingBongNetworkSync.ClientAllowPlayback;
         bool canEditSelection = !isClient || BingBongNetworkSync.ClientAllowSelectionEdit;
         bool canEditSubtitle = !isClient || BingBongNetworkSync.ClientAllowSubtitleEdit;
-        if (isClient)
-        {
+                 {
             GUI.color = new Color(1f, 1f, 0.5f);
             string playPerm = BingBongNetworkSync.ClientAllowPlayback ? "allowed" : "locked";
             string selPerm = BingBongNetworkSync.ClientAllowSelectionEdit ? "can edit" : "read-only";
@@ -506,8 +456,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.Space(4f);
         _soundsScroll = GUILayout.BeginScrollView(_soundsScroll, GUILayout.Height(320f));
 
-        for (int i = 0; i < Plugin.CustomClips.Count; i++)
-        {
+                 {
             AudioClip clip = Plugin.CustomClips[i];
             GUILayout.BeginHorizontal();
 
@@ -516,8 +465,7 @@ internal class UnifiedMenu : MonoBehaviour
             GUI.enabled = canEditSelection;
             bool newEnabled = GUILayout.Toggle(enabled, "", GUILayout.Width(20f));
             GUI.enabled = true;
-            if (newEnabled != enabled && canEditSelection)
-            {
+                         {
                 Plugin.EnabledClips[clip.name] = newEnabled;
                 Plugin.SaveSelection();
                 BingBongNetworkSync.BroadcastClipEnabled(clip.name, newEnabled);
@@ -531,8 +479,7 @@ internal class UnifiedMenu : MonoBehaviour
             GUI.enabled = canPlay;
             if (GUILayout.Button("Play", GUILayout.Width(60f)))
                 Plugin.PlayThroughPluginSource(clip);
-            if (GUILayout.Button("Force Next", GUILayout.Width(90f)))
-            {
+                         {
                 Plugin.ForcedNextClipName = clip.name;
                 BingBongNetworkSync.BroadcastForceNext(clip.name);
             }
@@ -555,15 +502,13 @@ internal class UnifiedMenu : MonoBehaviour
                 _subtitleDrafts[clip.name] = newDraft;
 
             GUI.enabled = canEditSubtitle;
-            if (GUILayout.Button("Save", GUILayout.Width(54f)))
-            {
+                         {
                 Plugin.SaveSubtitleOverrideForClip(clip.name, newDraft);
                 _subtitleDrafts[clip.name] = newDraft;
                 BingBongNetworkSync.BroadcastSubtitleUpdate(clip.name, newDraft);
             }
 
-            if (GUILayout.Button("Clear", GUILayout.Width(54f)))
-            {
+                         {
                 Plugin.SaveSubtitleOverrideForClip(clip.name, string.Empty);
                 _subtitleDrafts[clip.name] = string.Empty;
                 BingBongNetworkSync.BroadcastSubtitleUpdate(clip.name, string.Empty);
@@ -571,8 +516,7 @@ internal class UnifiedMenu : MonoBehaviour
             GUI.enabled = true;
             GUILayout.EndHorizontal();
 
-            if (Plugin.TimedSubtitleOverrides.ContainsKey(clip.name))
-            {
+                         {
                 GUILayout.BeginHorizontal();
                 GUILayout.Space(56f);
                 GUI.color = new Color(1f, 0.85f, 0.4f);
@@ -597,9 +541,7 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.enabled = true;
     }
 
-    // Draws the Playback tab as a full music player with transport controls and a scrollable queue. returns: void
-    private void DrawPlaybackTab()
-    {
+    private void DrawPlaybackTab() {
         bool isClient = BingBongNetworkSync.IsConnectedAsClient;
         bool canPlay = !isClient || BingBongNetworkSync.ClientAllowPlayback;
         List<AudioClip> active = Plugin.GetActiveClips();
@@ -611,10 +553,8 @@ internal class UnifiedMenu : MonoBehaviour
         AudioClip? nowPlaying = (isPlaying || isPaused) ? Plugin.PluginAudioSource!.clip : null;
 
         int currentActiveIndex = -1;
-        if (nowPlaying != null)
-        {
-            for (int i = 0; i < active.Count; i++)
-            {
+                 {
+                         {
                 if (active[i] == nowPlaying) { currentActiveIndex = i; break; }
             }
         }
@@ -640,18 +580,15 @@ internal class UnifiedMenu : MonoBehaviour
 
         GUI.enabled = canPlay;
         GUILayout.BeginHorizontal();
-        if (GUILayout.Button("<< Prev", GUILayout.Width(80f)))
-        {
-            if (active.Count > 0)
-            {
+                 {
+                         {
                 int baseIdx = currentActiveIndex >= 0 ? currentActiveIndex : _playerQueueIndex;
                 _playerQueueIndex = (baseIdx - 1 + active.Count) % active.Count;
                 Plugin.PlayThroughPluginSource(active[_playerQueueIndex]);
             }
         }
         string midLabel = isPlaying ? "|| Pause" : (isPaused ? "> Resume" : "> Play");
-        if (GUILayout.Button(midLabel, GUILayout.Width(90f)))
-        {
+                 {
             if (isPlaying)
                 Plugin.PausePlayback();
             else if (isPaused)
@@ -661,10 +598,8 @@ internal class UnifiedMenu : MonoBehaviour
         }
         if (GUILayout.Button("[] Stop", GUILayout.Width(70f)))
             Plugin.StopAllManagedAudio();
-        if (GUILayout.Button("Next >>", GUILayout.Width(80f)))
-        {
-            if (active.Count > 0)
-            {
+                 {
+                         {
                 int baseIdx = currentActiveIndex >= 0 ? currentActiveIndex : _playerQueueIndex;
                 _playerQueueIndex = (baseIdx + 1) % active.Count;
                 Plugin.PlayThroughPluginSource(active[_playerQueueIndex]);
@@ -677,25 +612,21 @@ internal class UnifiedMenu : MonoBehaviour
 
         GUILayout.Label($"Queue  --  {active.Count} playable clip(s):");
         _playbackScroll = GUILayout.BeginScrollView(_playbackScroll, GUILayout.Height(200f));
-        for (int i = 0; i < active.Count; i++)
-        {
+                 {
             AudioClip clip = active[i];
             bool isCurrent = clip == nowPlaying;
             GUILayout.BeginHorizontal();
-            if (isCurrent)
-            {
+                         {
                 GUI.color = isPlaying ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 1f, 0.5f);
                 GUILayout.Label(isPlaying ? ">" : "||", GUILayout.Width(16f));
             }
-            else
-            {
+                         {
                 GUILayout.Space(16f);
             }
             GUILayout.Label($"{i + 1}. {clip.name}  ({FormatTime(clip.length)})", GUILayout.ExpandWidth(true));
             GUI.color = Color.white;
             GUI.enabled = canPlay;
-            if (GUILayout.Button("Play", GUILayout.Width(50f)))
-            {
+                         {
                 _playerQueueIndex = i;
                 Plugin.PlayThroughPluginSource(clip);
             }
@@ -706,35 +637,26 @@ internal class UnifiedMenu : MonoBehaviour
 
     }
 
-    // Formats a duration in seconds as M:SS.
-    // seconds (float): duration to format
-    // returns: string
-    private static string FormatTime(float seconds)
-    {
+    private static string FormatTime(float seconds) {
         int s = Mathf.FloorToInt(Mathf.Max(0f, seconds));
         return $"{s / 60}:{s % 60:D2}";
     }
 
-    // Draws the Network tab with live sync status and per-client progress. returns: void
-    private void DrawNetworkTab()
-    {
+    private void DrawNetworkTab() {
         GUILayout.Label($"Sync server: {BingBongNetworkSync.StatusText}");
         GUILayout.Space(6f);
 
-        if (BingBongNetworkSync.IsHosting)
-        {
+                 {
             GUILayout.Space(4f);
             int servedFiles = BingBongNetworkSync.GetServedAudioFileCount();
             List<string> unsynced = BingBongNetworkSync.GetUnsyncedPlayerNames();
             List<(string displayName, int count)> clientCounts = BingBongNetworkSync.GetClientDownloadCounts();
             GUILayout.Label($"Serving {servedFiles} file(s) to {clientCounts.Count} known client(s)");
 
-            if (unsynced.Count > 0)
-            {
+                         {
                 GUI.color = new Color(1f, 0.6f, 0.4f);
                 GUILayout.Label($"Not yet synced ({unsynced.Count}):");
-                foreach (string name in unsynced)
-                {
+                                 {
                     int got = BingBongNetworkSync.GetPlayerSyncedFileCount(name);
                     string progress = servedFiles > 0 ? $" ({got}/{servedFiles} files)" : string.Empty;
                     GUILayout.Label($"  - {name}{progress}");
@@ -748,19 +670,16 @@ internal class UnifiedMenu : MonoBehaviour
                 GUI.color = Color.white;
             }
 
-            if (clientCounts.Count > 0)
-            {
+                         {
                 GUILayout.Space(2f);
-                foreach ((string name, int count) in clientCounts)
-                {
+                                 {
                     string syncTag = servedFiles > 0 && count >= servedFiles ? " [synced]" : $" [{count}/{servedFiles} files]";
                     GUILayout.Label($"  {name}{syncTag}");
                 }
             }
 
             List<(string fileName, int pending)> pendingImports = BingBongNetworkSync.GetPendingImports();
-            if (pendingImports.Count > 0)
-            {
+                         {
                 GUILayout.Space(4f);
                 GUILayout.Label("Waiting for clients to download:");
                 foreach ((string fileName, int pending) in pendingImports)
@@ -770,8 +689,7 @@ internal class UnifiedMenu : MonoBehaviour
         else if (!string.IsNullOrEmpty(BingBongNetworkSync.ActiveHostAddress))
         {
             GUILayout.Label($"Local clips loaded: {Plugin.CustomClips.Count}");
-            if (!BingBongNetworkSync.HasReachedHost)
-            {
+                         {
                 GUI.color = new Color(1f, 0.6f, 0.4f);
                 GUILayout.Label("Waiting for first reply from the host (running over Photon).");
                 GUILayout.Label("Verify the host has the mod installed and is in the same Photon room.");
@@ -787,9 +705,7 @@ internal class UnifiedMenu : MonoBehaviour
         }
     }
 
-    // Draws the Settings tab with global playback, network, and menu options. returns: void
-    private void DrawSettingsTab()
-    {
+    private void DrawSettingsTab() {
         bool isClient = BingBongNetworkSync.IsConnectedAsClient;
         bool isHost = BingBongNetworkSync.IsHosting;
         bool canSettings = !isClient || BingBongNetworkSync.ClientAllowSettingsChange;
@@ -805,14 +721,12 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndHorizontal();
         bool globalDistance = !Plugin.ShortRangeOnly.Value;
         Plugin.ShortRangeOnly.Value = !GUILayout.Toggle(globalDistance, "  Global distance (hear anywhere)");
-        if (Plugin.ShortRangeOnly.Value)
-        {
+                 {
             GUILayout.Label($"  Max distance: {Plugin.ShortRangeMaxDistance.Value:F0} m");
             Plugin.ShortRangeMaxDistance.Value = GUILayout.HorizontalSlider(Plugin.ShortRangeMaxDistance.Value, 5f, 200f);
         }
         Plugin.AutoPlayEnabled.Value = GUILayout.Toggle(Plugin.AutoPlayEnabled.Value, "  Auto-play random clip on a timer");
-        if (Plugin.AutoPlayEnabled.Value)
-        {
+                 {
             GUILayout.Label($"  Interval: {Plugin.AutoPlayIntervalSeconds.Value:F0} s");
             Plugin.AutoPlayIntervalSeconds.Value = GUILayout.HorizontalSlider(Plugin.AutoPlayIntervalSeconds.Value, 5f, 300f);
         }
@@ -829,8 +743,7 @@ internal class UnifiedMenu : MonoBehaviour
         maxSyncSlider = GUILayout.HorizontalSlider(maxSyncSlider, 0f, 8192f);
         Plugin.MaxSyncFileSizeKb.Value = maxSyncSlider < 64f ? 0 : (int)maxSyncSlider;
         GUILayout.Space(4f);
-        if (isHost)
-        {
+                 {
             GUILayout.Label("Client permissions:");
             Plugin.AllowClientImports.Value = GUILayout.Toggle(Plugin.AllowClientImports.Value,
                 "  Allow any client to upload new sounds to this host");
@@ -868,14 +781,11 @@ internal class UnifiedMenu : MonoBehaviour
         GUILayout.EndScrollView();
     }
 
-    // Draws the Importer tab with the URL field. returns: void
-    private void DrawImporterTab()
-    {
+    private void DrawImporterTab() {
         bool isClient = BingBongNetworkSync.IsConnectedAsClient;
         bool canImport = !isClient || BingBongNetworkSync.HostAllowsClientImports;
 
-        if (isClient)
-        {
+                 {
             GUI.color = canImport ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 0.6f, 0.4f);
             GUILayout.Label(canImport
                 ? "Connected as client -- host allows imports. Your download will be sent to the host."
@@ -904,34 +814,22 @@ internal class UnifiedMenu : MonoBehaviour
         GUI.enabled = true;
     }
 
-    // Sets every loaded clip's enabled flag and persists the change.
-    // value (bool): true to enable all, false to disable all
-    // returns: void
-    private void SetAllEnabled(bool value)
-    {
+    private void SetAllEnabled(bool value) {
         foreach (AudioClip c in Plugin.CustomClips)
             Plugin.EnabledClips[c.name] = value;
         Plugin.SaveSelection();
     }
 
-    // Opens the sounds folder in the OS file explorer. returns: void
-    private void OpenSoundsFolder()
-    {
-        try
-        {
+    private void OpenSoundsFolder() {
+                 {
             Application.OpenURL("file:///" + Plugin.SoundsFolder.Replace('\\', '/'));
         }
-        catch (Exception ex)
-        {
+                 {
             Plugin.Log.LogWarning($"OpenSoundsFolder failed: {ex.Message}");
         }
     }
 
-    // Returns a short tag showing which subtitle overrides are linked to the clip.
-    // clipName (string): clip name (no extension) to look up in SubtitleOverrides
-    // returns: string - "[S]", "[T]", "[ST]", or "[ ]" depending on which overrides are present
-    private static string SubtitleLinkTag(string clipName)
-    {
+    private static string SubtitleLinkTag(string clipName) {
         bool hasSimple = Plugin.SubtitleOverrides.TryGetValue(clipName, out string val) && !string.IsNullOrWhiteSpace(val);
         bool hasTimed = Plugin.TimedSubtitleOverrides.ContainsKey(clipName);
         if (hasSimple && hasTimed) return "[ST]";
