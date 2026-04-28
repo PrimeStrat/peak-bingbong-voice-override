@@ -228,7 +228,7 @@ internal static class NativeBingBongHandler {
             values.Add(text);
         }
 
-        indexer.SetValue(tableObject, values, new object[] { subtitleId });
+        indexer.SetValue(tableObject, values, [subtitleId]);
         return true;
     }
 }

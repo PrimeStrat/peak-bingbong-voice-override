@@ -6,14 +6,18 @@ using UnityEngine;
 namespace BingBongVoiceOverride.Patches;
 
 [HarmonyPatch(typeof(GameObject))]
-internal static class AskBingBongAddComponentPatch {
-    [HarmonyPatch(nameof(GameObject.AddComponent), new Type[] { typeof(Type) })]
+internal static class AskBingBongAddComponentPatch
+{
+    [HarmonyPatch(nameof(GameObject.AddComponent), [typeof(Type)])]
     [HarmonyPostfix]
-    private static void AddComponentPostfix(GameObject __instance, ref Component __result) {
-        if (!Plugin.UseNativeBingBongAPI.Value) {
+    private static void AddComponentPostfix(GameObject __instance, ref Component __result)
+    {
+        if (Plugin.UseNativeBingBongAPI.Value != true)
+        {
             return;
         }
 
-        AskBingBongResponseHandler.HandleCreatedObject((UnityEngine.Object)__result ?? __instance);
+        UnityEngine.Object created = __result != null ? __result : __instance;
+        AskBingBongResponseHandler.HandleCreatedObject(created);
     }
 }

@@ -2,26 +2,31 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.Json;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using BingBongVoiceOverride.Handlers;
-using BingBongVoiceOverride.Patches;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.Networking;
 
 namespace BingBongVoiceOverride;
 
 [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
 public class Plugin : BaseUnityPlugin
 {
-    internal static Plugin? Instance;
-    internal static ManualLogSource? Log;
-    internal static ConfigEntry<bool>? EnableMod;
-    internal static ConfigEntry<float>? VolumeMultiplier;
-    internal static ConfigEntry<KeyCode>? MenuToggleKey;
-    internal static ConfigEntry<bool>? UseNativeBingBongAPI;
+    [Serializable]
+    private sealed class SubtitleJsonData
+    {
+        public string subtitle = string.Empty;
+    }
+
+    internal static Plugin Instance = null!;
+    internal static ManualLogSource Log = null!;
+    internal static ConfigEntry<bool> EnableMod = null!;
+    internal static ConfigEntry<float> VolumeMultiplier = null!;
+    internal static ConfigEntry<KeyCode> MenuToggleKey = null!;
+    internal static ConfigEntry<bool> UseNativeBingBongAPI = null!;
 
     internal static readonly List<AudioClip> CustomClips = [];
     internal static readonly Dictionary<string, string> SubtitleOverrides = new(StringComparer.OrdinalIgnoreCase);
@@ -35,11 +40,12 @@ public class Plugin : BaseUnityPlugin
     internal static bool IsBingBongAudioActive => PluginAudioSource != null && PluginAudioSource.isPlaying;
 
     internal static bool MenuVisible = false;
+    internal static bool IsReloadingSounds => Instance != null && Instance.loadCoroutine != null;
 
-    public static string? SoundsFolder { get; private set; }
+    public static string SoundsFolder { get; private set; } = string.Empty;
 
     private Harmony? harmony;
-    private readonly bool refreshPending = false;
+    private Coroutine? loadCoroutine;
 
     private void Awake()
     {
@@ -77,7 +83,7 @@ public class Plugin : BaseUnityPlugin
 
         gameObject.AddComponent<Menu>();
 
-        StartCoroutine(LoadCustomClips());
+        loadCoroutine = StartCoroutine(LoadCustomClips());
 
         Log.LogInfo($"{MyPluginInfo.PLUGIN_NAME} v{MyPluginInfo.PLUGIN_VERSION} loaded.");
         Log.LogInfo($"Sounds folder: {SoundsFolder}");
@@ -85,7 +91,7 @@ public class Plugin : BaseUnityPlugin
 
     private void Update()
     {
-        if (!EnableMod.Value || refreshPending) return;
+        if (!EnableMod.Value) return;
     }
 
     private void OnDestroy()
@@ -104,6 +110,7 @@ public class Plugin : BaseUnityPlugin
     {
         CustomClips.Clear();
         EnabledClips.Clear();
+        SubtitleOverrides.Clear();
         ClipsReady = false;
 
         yield return null;
@@ -114,12 +121,12 @@ public class Plugin : BaseUnityPlugin
             string fileName = Path.GetFileNameWithoutExtension(filePath);
             string ext = Path.GetExtension(filePath).ToLowerInvariant();
 
-            AudioClip clip = null;
-            string loadError = null;
+            AudioClip? clip = null;
+            string? loadError = null;
 
             if (ext == ".ogg")
             {
-                clip = LoadOggClip(filePath, out loadError);
+                yield return LoadOggClip(filePath, loaded => clip = loaded, err => loadError = err);
             }
             else if (ext == ".wav")
             {
@@ -156,6 +163,26 @@ public class Plugin : BaseUnityPlugin
             int rewritten = NativeBingBongHandler.RewriteAllInScene();
             Log.LogInfo($"Rewrote {rewritten} Bing Bong instances with custom clips.");
         }
+
+        loadCoroutine = null;
+    }
+
+    internal static void RequestReloadSounds()
+    {
+        if (Instance == null)
+        {
+            return;
+        }
+
+        if (Instance.loadCoroutine != null)
+        {
+            Log.LogInfo("Reload already in progress.");
+            return;
+        }
+
+        StopAllPlayback();
+        Log.LogInfo("Reloading sounds and subtitle JSON...");
+        Instance.loadCoroutine = Instance.StartCoroutine(Instance.LoadCustomClips());
     }
 
     internal static void StopAllPlayback()
@@ -221,11 +248,8 @@ public class Plugin : BaseUnityPlugin
         try
         {
             string raw = File.ReadAllText(jsonPath);
-            var parsed = JsonSerializer.Deserialize<JsonElement>(raw, JsonOptions);
-            if (parsed.TryGetProperty("subtitle", out JsonElement subtitleElement))
-            {
-                return subtitleElement.GetString()?.Trim() ?? string.Empty;
-            }
+            SubtitleJsonData? parsed = JsonUtility.FromJson<SubtitleJsonData>(raw);
+            return parsed?.subtitle?.Trim() ?? string.Empty;
         }
         catch (Exception ex)
         {
@@ -255,37 +279,34 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    private AudioClip LoadOggClip(string filePath, out string error)
+    private static IEnumerator LoadOggClip(string filePath, Action<AudioClip?> setClip, Action<string?> setError)
     {
-        error = null;
-        try
+        string fileUrl = "file:///" + filePath.Replace('\\', '/');
+        using (UnityWebRequest request = UnityWebRequestMultimedia.GetAudioClip(fileUrl, AudioType.OGGVORBIS))
         {
-            using (FileStream fs = new(filePath, FileMode.Open, FileAccess.Read))
+            yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
             {
-                byte[] data = new byte[fs.Length];
-                fs.Read(data, 0, (int)fs.Length);
-
-                string fileName = Path.GetFileNameWithoutExtension(filePath);
-                AudioClip clip = AudioClip.Create(fileName, data.Length, 1, 44100, false);
-
-                float[] samples = new float[data.Length];
-                for (int i = 0; i < data.Length; i++)
-                {
-                    samples[i] = (data[i] - 128) / 256f;
-                }
-
-                clip.SetData(samples, 0);
-                return clip;
+                setError("OGG load error: " + request.error);
+                setClip(null);
+                yield break;
             }
-        }
-        catch (Exception ex)
-        {
-            error = $"OGG load error: {ex.Message}";
-            return null;
+
+            AudioClip? clip = DownloadHandlerAudioClip.GetContent(request);
+            if (clip == null)
+            {
+                setError("OGG load error: decoder returned null clip.");
+                setClip(null);
+                yield break;
+            }
+
+            setError(null);
+            setClip(clip);
         }
     }
 
-    private AudioClip LoadWavClip(string filePath, out string error)
+    private AudioClip? LoadWavClip(string filePath, out string? error)
     {
         error = null;
         try
@@ -331,12 +352,6 @@ public class Plugin : BaseUnityPlugin
     {
         // Could restore cursor/input state here if needed
     }
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        WriteIndented = true,
-    };
 
     private void EnsureExampleFiles()
     {
