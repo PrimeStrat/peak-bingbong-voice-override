@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0
+- Major refactor: removed network sync and Photon networking.
+- Simplified scope to dynamic audio override only.
+- Removed unnecessary null-safety overhead.
+
 ## 1.0.6
 - Backend auto-download config toggle in the attempt to test package uploading
 
