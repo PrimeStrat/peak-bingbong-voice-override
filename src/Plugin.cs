@@ -25,7 +25,6 @@ public class Plugin : BaseUnityPlugin
     internal static ManualLogSource Log = null!;
     internal static ConfigEntry<bool> EnableMod = null!;
     internal static ConfigEntry<float> VolumeMultiplier = null!;
-    internal static ConfigEntry<KeyCode> MenuToggleKey = null!;
     internal static ConfigEntry<bool> UseNativeBingBongAPI = null!;
 
     internal static readonly List<AudioClip> CustomClips = [];
@@ -39,7 +38,6 @@ public class Plugin : BaseUnityPlugin
 
     internal static bool IsBingBongAudioActive => PluginAudioSource != null && PluginAudioSource.isPlaying;
 
-    internal static bool MenuVisible = false;
     internal static bool IsReloadingSounds => Instance != null && Instance.loadCoroutine != null;
 
     public static string SoundsFolder { get; private set; } = string.Empty;
@@ -57,7 +55,6 @@ public class Plugin : BaseUnityPlugin
             "Volume scale applied to custom clips (0.0 = silent, 1.0 = original, 2.0 = double).");
         UseNativeBingBongAPI = Config.Bind("Subtitles", "UseNativeBingBongAPI", true,
             "When true, route subtitles through PEAK's native Bing Bong system.");
-        MenuToggleKey = Config.Bind("Menu", "MenuToggleKey", KeyCode.F6, "Toggle the mod menu on/off.");
 
         if (!EnableMod.Value)
         {
@@ -81,8 +78,6 @@ public class Plugin : BaseUnityPlugin
         PluginAudioSource.playOnAwake = false;
         PluginAudioSource.spatialBlend = 0f;
 
-        gameObject.AddComponent<Menu>();
-
         loadCoroutine = StartCoroutine(LoadCustomClips());
 
         Log.LogInfo($"{MyPluginInfo.PLUGIN_NAME} v{MyPluginInfo.PLUGIN_VERSION} loaded.");
@@ -96,7 +91,6 @@ public class Plugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
-        SetMenuVisible(false);
         StopAllPlayback();
         harmony?.UnpatchSelf();
     }
@@ -225,21 +219,6 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    internal static void SetMenuVisible(bool visible)
-    {
-        if (MenuVisible == visible) return;
-        MenuVisible = visible;
-
-        if (visible)
-        {
-            CaptureMenuState();
-        }
-        else
-        {
-            RestoreMenuState();
-        }
-    }
-
     private string ReadSubtitleOverride(string audioPath)
     {
         string jsonPath = Path.ChangeExtension(audioPath, ".json");
@@ -341,16 +320,6 @@ public class Plugin : BaseUnityPlugin
             error = $"WAV load error: {ex.Message}";
             return null;
         }
-    }
-
-    private static void CaptureMenuState()
-    {
-        // Could capture cursor/input state here if needed
-    }
-
-    private static void RestoreMenuState()
-    {
-        // Could restore cursor/input state here if needed
     }
 
     private void EnsureExampleFiles()
